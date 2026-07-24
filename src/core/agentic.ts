@@ -4,8 +4,8 @@ import { askAI } from '../core/ai.js';
 import { runSingleTest } from '../core/runner.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, readFileSync, existsSync, readdirSync } from 'fs';
-import { resolve, dirname } from 'path';
+import { writeFileSync, readFileSync, existsSync, readdirSync, mkdirSync } from 'fs';
+import { resolve, dirname, join, basename } from 'path';
 import { generateTestForFile } from '../commands/generate.js';
 import chalk from 'chalk';
 
@@ -16,7 +16,8 @@ type AgenticAction =
   | { action: 'install_deps'; deps: string[] }
   | { action: 'abort'; reason: string }
   | { action: 'read_file'; path: string }
-  | { action: 'list_dir'; path: string };
+  | { action: 'list_dir'; path: string }
+  | { action: 'generate_mock'; target: string; type: 'external' | 'internal' };
 
 interface AgenticPlan {
   reasoning: string;
@@ -114,8 +115,9 @@ export class AgenticPlanner {
       attempts++;
       const plan = await this._requestGenPlan(testCode, testFilePath, sourceFilePath, fileLines.length, history);
       if (!plan) {
-        console.log(chalk.red(`✖ AI failed to generate a valid generation plan.`));
-        return 'failed';
+        console.log(chalk.red(`✖ AI failed to generate a valid generation plan. Retrying...`));
+        history.push(`Attempt ${attempts}: SYSTEM ERROR - Last response was invalid JSON. Ensure you output raw JSON only, and properly escape quotes/newlines in any arrays or strings.`);
+        continue;
       }
 
       const currentStepsHash = JSON.stringify(plan.steps);
@@ -152,7 +154,8 @@ export class AgenticPlanner {
           history.push(`Attempt ${attempts}: Searched for "${step.query}". Results:\n${matchStr}`);
         } else if (step.action === 'append_test') {
           console.log(chalk.cyan(`  - 📝 Appending test code chunk`));
-          testCode += '\n' + step.code;
+          const codeToAppend = Array.isArray(step.code) ? step.code.join('\n') : step.code;
+          testCode += '\n' + codeToAppend;
           writeFileSync(testFilePath, testCode, 'utf-8');
           history.push(`Attempt ${attempts}: Appended test code.`);
           madeProgress = true;
@@ -160,6 +163,9 @@ export class AgenticPlanner {
           console.log(chalk.green(`  - ✅ AI finished generating the test file.`));
           history.push(`Attempt ${attempts}: Finished. Reason: ${step.reason}`);
           isFinished = true;
+        } else if (step.action === 'skip_file') {
+          console.log(chalk.yellow(`  - ⏭ Skipped: ${step.reason}`));
+          return 'skipped';
         }
       }
 
@@ -220,8 +226,9 @@ The JSON must follow this exact schema:
   "steps": [
     { "action": "search_file", "query": "<string to search for, e.g. 'export function'>" }
     | { "action": "read_lines", "start": <line number>, "end": <line number> }
-    | { "action": "append_test", "code": "<valid javascript/typescript test code block to append>" }
+    | { "action": "append_test", "code": ["<valid", "code", "array>"] }
     | { "action": "finish", "reason": "<explanation of completion>" }
+    | { "action": "skip_file", "reason": "<explanation if file contains no testable logic (e.g. pure data/config)>" }
   ]
 }
 
@@ -284,8 +291,9 @@ CRITICAL RULES:
         explorationAttempts++;
         const plan = await this._requestPlan(lastError, testCode, testFilePath, history, sourceFilePath, explorationContext);
         if (!plan) {
-          console.log(chalk.red(`✖ AI failed to generate a valid plan. Giving up on this file.`));
-          return 'failed';
+          console.log(chalk.red(`✖ AI failed to generate a valid plan. Retrying...`));
+          explorationContext += `\n--- SYSTEM ERROR ---\nYour last response was not valid JSON. Ensure you output raw JSON only, and properly escape quotes and newlines in any strings (especially replacementCode).\n`;
+          continue;
         }
         
         const currentStepsHash = JSON.stringify(plan.steps);
@@ -429,7 +437,17 @@ CRITICAL RULES:
 
   /** Prompt the LLM for a JSON plan based on a failed test run. */
   private async _requestPlan(errorOutput: string, testCode: string, testFilePath: string, history: string[], sourceFilePath?: string, explorationContext: string = ''): Promise<AgenticPlan | null> {
-    const historyContext = history.length > 0 ? `\n--- PREVIOUS ACTIONS TAKEN ---\n${history.join('\n')}\nWARNING: The test is still failing. Do NOT suggest the exact same action again.` : '';
+    let historyContext = '';
+    if (history.length > 0) {
+      historyContext = `\n--- PREVIOUS ACTIONS TAKEN ---\n${history.join('\n')}\nWARNING: The test is still failing. Do NOT suggest the exact same action again.`;
+      
+      // Multi-Agent Meta-Prompting: Wake up the Analyzer Agent if a patch failed or if we are stuck exploring for too long
+      const hasAppliedPatch = history.some(h => h.includes('Replaced lines') || h.includes('Installed dependencies') || h.includes('Aborted'));
+      if (history.length >= 2 && hasAppliedPatch) {
+        const dynamicInstruction = await this._analyzeFailure(history, errorOutput);
+        historyContext += `\n\nCRITICAL SELF-CORRECTION FROM ANALYZER AGENT:\n${dynamicInstruction}\nYOU MUST OBEY THIS INSTRUCTION IN YOUR NEXT PLAN.`;
+      }
+    }
     let sourceContext = '';
     if (sourceFilePath && existsSync(sourceFilePath)) {
       const sourceContent = readFileSync(sourceFilePath, 'utf-8');
@@ -458,13 +476,15 @@ CRITICAL RULES:
 --- ERROR OUTPUT ---
 ${errorOutput}${historyContext}
 Based on this information, suggest ONE JSON plan describing the next actionable step. The JSON must follow this schema:
-{ "reasoning": "<explain the failure and your fix or exploration strategy>", "steps": [ { "action": "replace_lines", "file": "${testFilePath}", "startLine": <number>, "endLine": <number>, "replacementCode": "<new test code to replace the specified lines>" } | { "action": "search_file", "file": "<path>", "query": "<string to search for>" } | { "action": "read_lines", "file": "<path>", "startLine": <number>, "endLine": <number> } | { "action": "read_file", "path": "<relative path to file>" } | { "action": "list_dir", "path": "<relative path to dir>" } | { "action": "install_deps", "deps": ["<package>"] } | { "action": "abort", "reason": "<text>" } ] }
+{ "reasoning": "<explain the failure and your fix or exploration strategy>", "steps": [ { "action": "replace_lines", "file": "<path to test file or mock file>", "startLine": <number>, "endLine": <number>, "replacementCode": ["const example = 1;", "module.exports = example;"] } | { "action": "search_file", "file": "<path>", "query": "<string to search for>" } | { "action": "read_lines", "file": "<path>", "startLine": <number>, "endLine": <number> } | { "action": "read_file", "path": "<relative path to file>" } | { "action": "list_dir", "path": "<relative path to dir>" } | { "action": "install_deps", "deps": ["<package>"], "dev": <boolean> } | { "action": "generate_mock", "target": "<package-name>", "type": "external" } | { "action": "abort", "reason": "<text>" } ] }
 CRITICAL RULES:
 1. To explore massive files safely, use "search_file" to find function signatures, then "read_lines" to read the implementation block. For small files, use "read_file". If you need to see what files exist in a directory, use "list_dir".
-2. You may ONLY patch the test file (${testFilePath}) using the "replace_lines" action.
+2. You may ONLY patch the test file (${testFilePath}) OR files inside the __mocks__ directory using the "replace_lines" action. Do NOT modify the actual application source code.
 3. For "replace_lines", provide the exact startLine and endLine numbers based on the line numbers shown in the TEST FILE block. To insert code without removing any lines, set startLine and endLine to the line number where you want to insert.
-4. Do NOT wrap the JSON in markdown code blocks. Output ONLY the raw JSON object.
-5. If you cannot fix the issue, return an "abort" action.`;
+4. If the test fails due to a missing dependency or missing export (e.g. Stripe, AWS), return the "generate_mock" action instead of writing messy inline mocks.
+5. Do NOT wrap the JSON in markdown code blocks. Output ONLY the raw JSON object.
+6. If you cannot fix the issue, return an "abort" action.
+7. If using "install_deps" for testing libraries (like supertest or jest), set "dev": true. If installing application source dependencies (like express or mongoose), set "dev": false.`;
     try {
       const raw = await askAI(this.config, 'Generate a JSON plan to fix the failing test.', prompt);
       const plan = this._parsePlan(raw);
@@ -473,6 +493,22 @@ CRITICAL RULES:
     } catch (error: any) {
       console.log(chalk.red(`\n✖ AI request failed: ${error.message || error}`));
       return null;
+    }
+  }
+
+  /** The Analyzer Agent: analyzes failures and generates a dynamic strategy pivot. */
+  private async _analyzeFailure(history: string[], errorOutput: string): Promise<string> {
+    const prompt = `You are the Analyzer Agent. The Actor Agent is stuck in a loop trying to fix a test.\n\n--- PREVIOUS ACTIONS TAKEN ---\n${history.join('\n')}\n\n--- CURRENT ERROR OUTPUT ---\n${errorOutput}\n\nBased on this, what is the Actor Agent doing wrong? Write a 1-2 sentence critical instruction for the Actor Agent telling it exactly how to change its strategy. 
+CRITICAL RULES:
+1. If the Actor is stuck trying to mock untestable framework plumbing (e.g., server entry points, complex middleware, or deep library internals), instruct it to STOP mocking immediately. Tell it to either write an integration test using the appropriate framework (e.g. supertest), or return the 'abort' action if it cannot be fixed.
+2. If the Actor is struggling with complex chained object errors, tell it to use 'generate_mock' to abstract the issue globally.
+Output ONLY the instruction string, nothing else.`;
+    try {
+      console.log(chalk.cyan(`  - 🧠 Analyzer Agent evaluating failure...`));
+      const response = await askAI(this.config, 'Analyze failure and generate a self-correction instruction.', prompt);
+      return response.trim();
+    } catch (e) {
+      return "CRITICAL SELF-CORRECTION: You are failing repeatedly. Pivot your strategy and stop repeating the same actions.";
     }
   }
 
@@ -497,10 +533,12 @@ CRITICAL RULES:
       if (!allowed.has(step.action)) return false;
       if (step.action === 'replace_lines') {
         const abs = resolve(step.file);
-        if (abs !== testFilePath) return false; // Strictly enforce only patching the test file
+        const isTestFile = abs === testFilePath;
+        const isMockFile = abs.includes('__mocks__');
+        if (!isTestFile && !isMockFile) return false; // Strictly enforce only patching the test file or mock files
         if (typeof (step as any).startLine !== 'number') return false;
         if (typeof (step as any).endLine !== 'number') return false;
-        if (typeof (step as any).replacementCode !== 'string') return false;
+        if (typeof (step as any).replacementCode !== 'string' && !Array.isArray((step as any).replacementCode)) return false;
       }
       if (step.action === 'install_deps') {
         if (!Array.isArray((step as any).deps)) return false;
@@ -517,6 +555,10 @@ CRITICAL RULES:
         if (typeof (step as any).startLine !== 'number') return false;
         if (typeof (step as any).endLine !== 'number') return false;
       }
+      if (step.action === 'generate_mock') {
+        if (typeof (step as any).target !== 'string') return false;
+        if ((step as any).type !== 'external' && (step as any).type !== 'internal') return false;
+      }
     }
     return true;
   }
@@ -531,7 +573,13 @@ CRITICAL RULES:
           const startIdx = Math.max(0, step.startLine - 1);
           const endIdx = Math.min(lines.length, step.endLine);
           
-          const newLines = (step as any).replacementCode.split('\n');
+          let newLines: string[] = [];
+          if (Array.isArray((step as any).replacementCode)) {
+            newLines = (step as any).replacementCode;
+          } else if (typeof (step as any).replacementCode === 'string') {
+            newLines = (step as any).replacementCode.split('\n');
+          }
+          
           lines.splice(startIdx, endIdx - startIdx, ...newLines);
           
           writeFileSync(step.file, lines.join('\n'), 'utf-8');
@@ -539,11 +587,18 @@ CRITICAL RULES:
         }
         case 'install_deps': {
           const deps = (step as any).deps.join(' ');
+          const isDev = (step as any).dev !== false; // default to dev if not explicitly false
+          const saveFlag = isDev ? '--save-dev' : '--save';
           try {
-            await execAsync(`npm install --save-dev ${deps}`, { cwd: process.cwd() });
+            await execAsync(`npm install ${saveFlag} ${deps}`, { cwd: process.cwd() });
           } catch (e) {
             return 'abort';
           }
+          break;
+        }
+        case 'generate_mock': {
+          console.log(chalk.magenta(`  - 🛠 Auto-Mocking missing dependency: ${(step as any).target}`));
+          await this.generateMock((step as any).target, (step as any).type);
           break;
         }
         case 'abort': {
@@ -552,5 +607,83 @@ CRITICAL RULES:
       }
     }
     return 'continue';
+  }
+
+  /**
+   * Generates a global __mocks__ file for the given dependency or file.
+   */
+  public async generateMock(target: string, type: 'internal' | 'external', forceUpdate: boolean = false): Promise<'generated' | 'failed' | 'skipped'> {
+    let prompt = '';
+    let mockDir = '';
+    let mockFileName = '';
+
+    if (type === 'external') {
+      prompt = `Generate a Jest/Vitest global mock implementation for the NPM package: "${target}".\n` +
+               `Output ONLY the raw javascript/typescript code for the mock. Do not include markdown code blocks.`;
+      mockDir = join(process.cwd(), '__mocks__');
+      mockFileName = `${target}.js`;
+    } else {
+      if (!existsSync(target)) {
+        console.error(chalk.red(`File not found: ${target}`));
+        return 'failed';
+      }
+      const sourceCode = readFileSync(target, 'utf-8');
+      prompt = `Generate a Jest/Vitest global mock for the following local file:\n\n` +
+               `\`\`\`\n${sourceCode}\n\`\`\`\n\n` +
+               `Output ONLY the raw javascript/typescript code for the mock. Do not include markdown code blocks.`;
+      mockDir = join(dirname(target), '__mocks__');
+      const baseName = basename(target);
+      mockFileName = baseName;
+    }
+
+    const mockPath = join(mockDir, mockFileName);
+    let existingMockCode = '';
+
+    if (existsSync(mockPath)) {
+      if (forceUpdate) {
+        // Will overwrite entirely
+      } else {
+        existingMockCode = readFileSync(mockPath, 'utf-8');
+        console.log(chalk.blue(`ℹ Evaluating existing mock for ${target}...`));
+      }
+    }
+
+    if (existingMockCode) {
+      prompt += `\n\nHere is the existing mock file for this target:\n\`\`\`javascript\n${existingMockCode}\n\`\`\`\n\n` +
+                `Analyze this existing mock. If it is missing standard functions or properties for ${target}, return the FULLY UPDATED mock file (merging your new additions with the existing code).\n` +
+                `Do not delete any custom manual logic the user already wrote.\n` +
+                `If the existing mock already looks complete and covers standard cases, return EXACTLY the word: "COMPLETE".\n` +
+                `Output ONLY the raw javascript/typescript code.`;
+    }
+
+    try {
+      const response = await askAI(this.config, "You are an expert QA engineer.", prompt);
+      let code = response.trim();
+      
+      if (code === 'COMPLETE' || code === '"COMPLETE"' || code === "'COMPLETE'") {
+         return 'skipped';
+      }
+
+      if (code.startsWith('\`\`\`')) {
+         const lines = code.split('\n');
+         lines.shift();
+         if (lines[lines.length - 1].startsWith('\`\`\`')) {
+            lines.pop();
+         }
+         code = lines.join('\n');
+      }
+
+      const mockPath = join(mockDir, mockFileName);
+      const mockPathDir = dirname(mockPath);
+      if (!existsSync(mockPathDir)) {
+        mkdirSync(mockPathDir, { recursive: true });
+      }
+
+      writeFileSync(mockPath, code, 'utf-8');
+      return 'generated';
+    } catch (e: any) {
+      console.error(chalk.red(`Failed to generate mock: ${e.message}`));
+      return 'failed';
+    }
   }
 }

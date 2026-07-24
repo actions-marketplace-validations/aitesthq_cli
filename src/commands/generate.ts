@@ -9,8 +9,9 @@ import { promisify } from 'util';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { resolve, relative, dirname, basename, extname } from 'path';
 import fg from 'fast-glob';
-import { scanDependencies, generateWorkspaceMap } from '../core/scanner.js';
+import { scanDependencies, generateWorkspaceMap, scanExternalDependencies } from '../core/scanner.js';
 import chalk from 'chalk';
+import { AgenticPlanner } from '../core/agentic.js';
 
 const execAsync = promisify(exec);
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
@@ -49,6 +50,20 @@ export async function generateTestForFile(
   }
 
   const depsContext = await scanDependencies(filePath);
+  
+  // Pre-flight Global Mocking
+  const externalDeps = scanExternalDependencies(filePath);
+  if (externalDeps.length > 0) {
+     const planner = new AgenticPlanner(config, projectInfo);
+     for (const dep of externalDeps) {
+        const mockPath = resolve(process.cwd(), '__mocks__', `${dep}.js`);
+        if (!existsSync(mockPath)) {
+           spinner.info(`Pre-flight: Building missing global mock for "${dep}"...`);
+           await planner.generateMock(dep, 'external');
+        }
+     }
+  }
+
   let additionalContext = depsContext
     ? `\n\n--- ARCHITECTURAL CONTEXT (DEPENDENCIES) ---\n${depsContext}`
     : '';
@@ -77,7 +92,7 @@ export async function generateTestForFile(
       }
     } else {
       const testFramework = projectInfo.testRunner === 'unknown' ? 'Jest' : projectInfo.testRunner;
-      promptInstructions = `You are an expert QA and software testing engineer. Generate a comprehensive unit test suite for the provided code. Output ONLY valid executable code (with markdown code blocks) and nothing else. The target test framework is ${testFramework}. If the file is purely type definitions, interfaces, simple exports, or does not contain testable logic, reply ONLY with the exact string "SKIP_FILE" and do not generate any code. You will be provided with the target code and its imported dependencies to ensure you have the full architectural context.\nCRITICAL: If testing Prisma or databases, use standard mock techniques (e.g. jest-mock-extended or vi.mock). If using Vitest, use vi.mocked() to mock imported functions to avoid TypeScript errors like 'Property does not exist on type'.`;
+      promptInstructions = `You are an expert QA and software testing engineer. Generate a comprehensive unit test suite for the provided code. Output ONLY valid executable code (with markdown code blocks) and nothing else. The target test framework is ${testFramework}. If the file is purely type definitions, interfaces, simple exports, or does not contain testable logic, reply ONLY with the exact string "SKIP_FILE" and do not generate any code. You will be provided with the target code and its imported dependencies to ensure you have the full architectural context.\nCRITICAL: Assume global mocks exist in the __mocks__ directory for all third-party libraries. DO NOT write massive inline mock implementations inside the test file. Rely on the global mocks and only write the pure unit test logic.\nCRITICAL: If the file represents a framework entry point or server initialization file, do NOT try to unit test internal plumbing with mocks. You MUST write an integration test (using tools like supertest if applicable).\nCRITICAL: If testing databases or ORMs, use standard mock techniques. If using Vitest, use vi.mocked() to mock imported functions to avoid TypeScript errors like 'Property does not exist on type'.`;
     }
 
     const generatedCode = await askAI(config, promptInstructions, promptContext);
@@ -180,6 +195,7 @@ export const generateCommand = new Command('generate')
           '**/dist/**',
           '**/build/**',
           '**/coverage/**',
+          '**/__mocks__/**',
           '**/*.test.*',
           '**/*.spec.*',
           '**/vite.config.*',

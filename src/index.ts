@@ -11,6 +11,7 @@ import { doctorCommand } from './commands/doctor.js';
 import { scanCommand } from './commands/scan.js';
 import { configCommand } from './commands/config.js';
 import { fixCommand } from './commands/fix.js';
+import { mockCommand } from './commands/mock.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const packageJson = JSON.parse(readFileSync(resolve(__dirname, '../package.json'), 'utf-8'));
@@ -30,5 +31,6 @@ program.addCommand(doctorCommand);
 program.addCommand(scanCommand);
 program.addCommand(configCommand);
 program.addCommand(fixCommand);
+program.addCommand(mockCommand);
 
 program.parse(process.argv);

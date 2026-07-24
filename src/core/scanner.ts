@@ -104,3 +104,41 @@ export async function generateWorkspaceMap(): Promise<string> {
     return '';
   }
 }
+
+export function scanExternalDependencies(filePath: string): string[] {
+  try {
+    const project = new Project();
+    const sourceFile = project.addSourceFileAtPath(filePath);
+    
+    const externalDeps = new Set<string>();
+    const imports = sourceFile.getImportDeclarations();
+    
+    for (const imp of imports) {
+      const moduleSpecifier = imp.getModuleSpecifierValue();
+      
+      // If it doesn't start with . or / it's likely an NPM package or built-in
+      if (!moduleSpecifier.startsWith('.') && !moduleSpecifier.startsWith('/')) {
+        // Strip out subpaths like 'stripe/lib/crypto' -> 'stripe'
+        // But support scoped packages like '@aws-sdk/client-s3'
+        let pkgName = moduleSpecifier;
+        if (pkgName.startsWith('@')) {
+           const parts = pkgName.split('/');
+           if (parts.length >= 2) {
+             pkgName = `${parts[0]}/${parts[1]}`;
+           }
+        } else {
+           pkgName = pkgName.split('/')[0];
+        }
+        
+        // Skip common node built-ins
+        const builtIns = ['fs', 'path', 'crypto', 'child_process', 'util', 'os', 'http', 'https', 'events'];
+        if (!builtIns.includes(pkgName)) {
+           externalDeps.add(pkgName);
+        }
+      }
+    }
+    return Array.from(externalDeps);
+  } catch (err) {
+    return [];
+  }
+}

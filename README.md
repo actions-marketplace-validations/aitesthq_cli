@@ -74,10 +74,35 @@ aitest fix
 ```
 The AI will run your entire test suite, isolate the failures, analyze the error stack traces, and incrementally patch your test files until they turn green.
 
+### Generate Global Mocks
+Mocking external dependencies (like Stripe or AWS) by hand is incredibly tedious. You can tell the AI to automatically read your `package.json` and generate global `__mocks__` for all your third-party dependencies:
+```bash
+aitest mock --dependencies
+```
+You can also generate a mock for a specific internal file to isolate your unit tests:
+```bash
+aitest mock --file src/utils/database.js
+```
+
 ### Explain Failures
 Don't want the AI to fix it for you? Just ask it to explain why a test is failing:
 ```bash
 aitest explain
+```
+
+### Continuous Integration (CI) Mode
+You can automate your entire team's debugging by dropping `aitest` directly into your GitHub Actions! If a developer breaks a test, the CLI will autonomously fix it and open a PR:
+
+```yaml
+steps:
+  - name: Run AI Test Auto-Fix
+    run: aitest fix --ci
+    
+  - name: Create Pull Request
+    uses: peter-evans/create-pull-request@v6
+    with:
+      title: "🤖 AI Test CLI: Fixed broken tests"
+      commit-message: "chore: Auto-fixed broken tests via AI"
 ```
 
 ---

@@ -14,6 +14,7 @@ const execAsync = promisify(exec);
 
 export const fixCommand = new Command('fix')
   .description('Attempts automatic repair of failing tests using Agentic AI')
+  .option('--ci', 'Run in CI mode (disables interactive prompts and fails loudly on errors)')
   .action(async (options) => {
     const config = await loadConfig();
     if (!config) {
@@ -123,6 +124,9 @@ ${stderrStr.slice(-3000)}
           console.log(chalk.yellow('☕ ' + terminalLink('Buy the creator a coffee!', 'https://buymeacoffee.com/cijaytechnh')) + '\n');
        } else {
          logger.error(`✖ Auto-repair flow failed or aborted for ${failingFile}.`);
+         if (options.ci) {
+           process.exit(1);
+         }
        }
        process.exit(0);
 
