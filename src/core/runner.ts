@@ -14,7 +14,7 @@ export async function runSingleTest(testFilePath: string, projectInfo: ProjectIn
   let command = `npm test -- "${testFilePath}"`;
   
   if (projectInfo.testRunner === 'jest') {
-    command = `npx jest "${testFilePath}" --forceExit`;
+    command = `npx jest "${testFilePath}" --forceExit --silent`;
   } else if (projectInfo.testRunner === 'vitest') {
     command = `npx vitest run "${testFilePath}"`;
   } else if (projectInfo.testRunner === 'mocha') {

@@ -21,10 +21,12 @@ export const scanCommand = new Command('scan')
           '**/dist/**', 
           '**/build/**', 
           '**/coverage/**', 
+          '**/__mocks__/**',
           '**/*.test.*', 
           '**/*.spec.*', 
-          '**/vite.config.*',
-          '**/tsup.config.*',
+          '**/*.config.*',
+          '**/setupTests.*',
+          '**/jest.setup.*',
           '**/.*'
         ],
         cwd: process.cwd()

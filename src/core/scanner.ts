@@ -142,3 +142,86 @@ export function scanExternalDependencies(filePath: string): string[] {
     return [];
   }
 }
+
+export function generateASTMap(filePath: string): string {
+  try {
+    const project = new Project();
+    const sourceFile = project.addSourceFileAtPath(filePath);
+    let output = '--- FILE STRUCTURE MAP ---\n';
+    let itemCount = 0;
+    const maxItems = 50;
+
+    const formatLines = (node: any) => `(Lines ${node.getStartLineNumber()} - ${node.getEndLineNumber()})`;
+
+    for (const func of sourceFile.getFunctions()) {
+      if (itemCount >= maxItems) break;
+      const name = func.getName() || 'anonymous';
+      output += `- Function: \`${name}\` ${formatLines(func)}\n`;
+      itemCount++;
+    }
+
+    for (const cls of sourceFile.getClasses()) {
+      if (itemCount >= maxItems) break;
+      const name = cls.getName() || 'anonymous';
+      output += `- Class: \`${name}\` ${formatLines(cls)}\n`;
+      itemCount++;
+      for (const method of cls.getMethods()) {
+         output += `  - Method: \`${method.getName()}\` ${formatLines(method)}\n`;
+      }
+    }
+
+    for (const variable of sourceFile.getVariableStatements()) {
+      if (itemCount >= maxItems) break;
+      for (const dec of variable.getDeclarations()) {
+         // Skip require() statements to avoid cluttering the map with imports
+         if (dec.getInitializer()?.getText().startsWith('require(')) continue;
+         
+         output += `- Variable: \`${dec.getName()}\` ${formatLines(dec)}\n`;
+         itemCount++;
+      }
+    }
+    
+    for (const stmt of sourceFile.getStatements()) {
+       if (itemCount >= maxItems) break;
+       if (stmt.getKindName() === 'ExpressionStatement') {
+          const expr = (stmt as any).getExpression();
+          if (expr && expr.getKindName() === 'BinaryExpression') {
+             const left = expr.getLeft().getText();
+             if (left.startsWith('module.exports') || left.startsWith('exports.')) {
+                const right = expr.getRight();
+                if (right.getKindName() === 'ObjectLiteralExpression') {
+                   for (const prop of right.getProperties()) {
+                      if (itemCount >= maxItems) break;
+                      let propName = 'unknown';
+                      if (prop.getKindName() === 'PropertyAssignment' || prop.getKindName() === 'MethodDeclaration' || prop.getKindName() === 'ShorthandPropertyAssignment') {
+                         propName = (prop as any).getName();
+                      }
+                      output += `- Exported Member: \`${propName}\` ${formatLines(prop)}\n`;
+                      itemCount++;
+                   }
+                } else {
+                   const name = left.replace('module.exports.', '').replace('exports.', '');
+                   if (name && name !== 'module.exports') {
+                      output += `- Exported Member: \`${name}\` ${formatLines(stmt)}\n`;
+                      itemCount++;
+                   }
+                }
+             }
+          }
+       }
+    }
+
+    if (itemCount >= maxItems) {
+       output += `\n... [MAP TRUNCATED: File exports over ${maxItems} items. Focus on the available ones first.]`;
+    }
+
+    if (itemCount === 0) {
+       output += "- No explicitly exported functions or classes detected. (This might be a pure execution script or dynamic export file).\n";
+    }
+
+    return output;
+  } catch (error: any) {
+    logger.error(`AST Mapping failed for ${filePath}: ${error.message}`);
+    return '--- FILE STRUCTURE MAP ---\n- [AST Parser failed to map this file]\n';
+  }
+}

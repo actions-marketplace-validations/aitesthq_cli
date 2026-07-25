@@ -28,7 +28,7 @@ export const fixCommand = new Command('fix')
     if (projectInfo.testRunner === 'vitest') {
         testCommand = 'npx vitest run';
     } else if (projectInfo.testRunner === 'jest') {
-        testCommand = 'npx jest';
+        testCommand = 'npx jest --silent';
     } else if (projectInfo.testRunner === 'mocha') {
         testCommand = 'npx mocha';
     }

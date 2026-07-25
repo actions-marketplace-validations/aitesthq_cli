@@ -7,6 +7,7 @@ import { promisify } from 'util';
 import { writeFileSync, readFileSync, existsSync, readdirSync, mkdirSync } from 'fs';
 import { resolve, dirname, join, basename } from 'path';
 import { generateTestForFile } from '../commands/generate.js';
+import { generateASTMap } from '../core/scanner.js';
 import chalk from 'chalk';
 
 const execAsync = promisify(exec);
@@ -110,10 +111,13 @@ export class AgenticPlanner {
     }
 
     console.log(chalk.blue(`ℹ Starting Agentic Chunking Generator for ${sourceFilePath.split('/').pop()} (${fileLines.length} lines)...`));
+    
+    console.log(chalk.blue(`ℹ Analyzing file architecture...`));
+    const astMap = generateASTMap(sourceFilePath);
 
     while (attempts < maxAttempts) {
       attempts++;
-      const plan = await this._requestGenPlan(testCode, testFilePath, sourceFilePath, fileLines.length, history);
+      const plan = await this._requestGenPlan(testCode, testFilePath, sourceFilePath, fileLines.length, history, astMap);
       if (!plan) {
         console.log(chalk.red(`✖ AI failed to generate a valid generation plan. Retrying...`));
         history.push(`Attempt ${attempts}: SYSTEM ERROR - Last response was invalid JSON. Ensure you output raw JSON only, and properly escape quotes/newlines in any arrays or strings.`);
@@ -195,8 +199,9 @@ export class AgenticPlanner {
     return testCode.trim().length > 0 ? 'generated' : 'failed';
   }
 
-  private async _requestGenPlan(testCode: string, testFilePath: string, sourceFilePath: string, totalLines: number, history: string[]): Promise<any | null> {
-    const historyContext = history.length > 0 ? `\n--- PREVIOUS ACTIONS & RESULTS ---\n${history.join('\n\n')}\n` : '';
+  private async _requestGenPlan(testCode: string, testFilePath: string, sourceFilePath: string, totalLines: number, history: string[], astMap: string): Promise<any | null> {
+    const historyToKeep = history.slice(-3);
+    const historyContext = historyToKeep.length > 0 ? `\n--- RECENT ACTIONS & RESULTS (Last 3) ---\n${historyToKeep.join('\n\n')}\n` : '';
     const testFramework = this.projectInfo.testRunner === 'unknown' ? 'Jest' : this.projectInfo.testRunner;
     
     const isCloud = this._isCloudProvider();
@@ -216,6 +221,9 @@ export class AgenticPlanner {
 File: ${sourceFilePath}
 Total Lines: ${totalLines}
 Test Framework: ${testFramework}
+
+${astMap}
+
 ${testContext}
 ${historyContext}
 Your goal is to explore the target file chunk-by-chunk and incrementally build the test suite by appending test blocks.
@@ -224,8 +232,7 @@ The JSON must follow this exact schema:
 {
   "reasoning": "<explain what you are looking for or writing>",
   "steps": [
-    { "action": "search_file", "query": "<string to search for, e.g. 'export function'>" }
-    | { "action": "read_lines", "start": <line number>, "end": <line number> }
+    { "action": "read_lines", "start": <line number>, "end": <line number> }
     | { "action": "append_test", "code": ["<valid", "code", "array>"] }
     | { "action": "finish", "reason": "<explanation of completion>" }
     | { "action": "skip_file", "reason": "<explanation if file contains no testable logic (e.g. pure data/config)>" }
@@ -234,11 +241,11 @@ The JSON must follow this exact schema:
 
 CRITICAL RULES:
 1. Do NOT wrap the JSON in markdown blocks. Output ONLY raw JSON.
-2. If you don't know where the functions are, use \`search_file\` with queries like "class ", "function ", or "module.exports" to find line numbers.
-3. Once you know the line numbers, use \`read_lines\` to read the implementation of a specific function (max 300 lines at a time).
+2. Use the FILE STRUCTURE MAP provided above to identify exported functions and their exact line numbers. Do NOT search for functions manually.
+3. Use \`read_lines\` to read the implementation of a specific function based on the map's line numbers.
 4. After reading the implementation, use \`append_test\` to write the test case(s) for that specific function.
 5. If using \`append_test\`, ensure the code is a complete block (e.g. \`describe('...', () => { ... })\`).
-6. When you have tested all major functions, use \`finish\`.`;
+6. When you have tested all major exported functions in the map, use \`finish\`.`;
 
     try {
       const raw = await askAI(this.config, 'Generate a JSON plan for incremental test generation.', prompt);
@@ -247,7 +254,11 @@ CRITICAL RULES:
       if (!match) return null;
       return JSON.parse(match[0]);
     } catch (error: any) {
+      const msg = (error.message || error).toString().toLowerCase();
       console.log(chalk.red(`\n✖ AI generator request failed: ${error.message || error}`));
+      if (msg.includes('balance') || msg.includes('429') || msg.includes('too many requests')) {
+         process.exit(1);
+      }
       return null;
     }
   }
@@ -381,6 +392,10 @@ CRITICAL RULES:
             needsToBreakAndRunTests = true;
             console.log(chalk.cyan(`  - 📦 Install dependencies: ${step.deps.join(', ')}`));
             history.push(`Attempt ${attempts}: Installed dependencies ${step.deps.join(', ')}`);
+          } else if (step.action === 'delete_file') {
+            needsToBreakAndRunTests = true;
+            console.log(chalk.red(`  - 🗑️ Deleting file: ${step.file}`));
+            history.push(`Attempt ${attempts}: Deleted file ${step.file}`);
           } else if (step.action === 'abort') {
             needsToBreakAndRunTests = true;
             console.log(chalk.cyan(`  - 🛑 Abort: ${step.reason}`));
@@ -476,12 +491,12 @@ CRITICAL RULES:
 --- ERROR OUTPUT ---
 ${errorOutput}${historyContext}
 Based on this information, suggest ONE JSON plan describing the next actionable step. The JSON must follow this schema:
-{ "reasoning": "<explain the failure and your fix or exploration strategy>", "steps": [ { "action": "replace_lines", "file": "<path to test file or mock file>", "startLine": <number>, "endLine": <number>, "replacementCode": ["const example = 1;", "module.exports = example;"] } | { "action": "search_file", "file": "<path>", "query": "<string to search for>" } | { "action": "read_lines", "file": "<path>", "startLine": <number>, "endLine": <number> } | { "action": "read_file", "path": "<relative path to file>" } | { "action": "list_dir", "path": "<relative path to dir>" } | { "action": "install_deps", "deps": ["<package>"], "dev": <boolean> } | { "action": "generate_mock", "target": "<package-name>", "type": "external" } | { "action": "abort", "reason": "<text>" } ] }
+{ "reasoning": "<explain the failure and your fix or exploration strategy>", "steps": [ { "action": "replace_lines", "file": "<path to test file or mock file>", "startLine": <number>, "endLine": <number>, "replacementCode": ["const example = 1;", "module.exports = example;"] } | { "action": "search_file", "file": "<path>", "query": "<string to search for>" } | { "action": "read_lines", "file": "<path>", "startLine": <number>, "endLine": <number> } | { "action": "read_file", "path": "<relative path to file>" } | { "action": "list_dir", "path": "<relative path to dir>" } | { "action": "install_deps", "deps": ["<package>"], "dev": <boolean> } | { "action": "generate_mock", "target": "<package-name>", "type": "external" } | { "action": "delete_file", "file": "<path>" } | { "action": "abort", "reason": "<text>" } ] }
 CRITICAL RULES:
 1. To explore massive files safely, use "search_file" to find function signatures, then "read_lines" to read the implementation block. For small files, use "read_file". If you need to see what files exist in a directory, use "list_dir".
-2. You may ONLY patch the test file (${testFilePath}) OR files inside the __mocks__ directory using the "replace_lines" action. Do NOT modify the actual application source code.
+2. You may ONLY patch the test file (${testFilePath}), files inside the __mocks__ directory, or test configuration/setup files (like jest.config.js or setupTests.js) using the "replace_lines" action. Do NOT modify the actual application source code. The "delete_file" action is ONLY allowed for removing broken files inside the __mocks__ directory or test configs.
 3. For "replace_lines", provide the exact startLine and endLine numbers based on the line numbers shown in the TEST FILE block. To insert code without removing any lines, set startLine and endLine to the line number where you want to insert.
-4. If the test fails due to a missing dependency or missing export (e.g. Stripe, AWS), return the "generate_mock" action instead of writing messy inline mocks.
+4. If the test fails due to complex chained object queries (e.g. ORMs, query builders) or missing dependencies, return the "generate_mock" action. You can output multiple "generate_mock" actions in the same plan (e.g. one for an external library, one for an internal module, etc.) to instantly build global mocks instead of manually rewriting the test file.
 5. Do NOT wrap the JSON in markdown code blocks. Output ONLY the raw JSON object.
 6. If you cannot fix the issue, return an "abort" action.
 7. If using "install_deps" for testing libraries (like supertest or jest), set "dev": true. If installing application source dependencies (like express or mongoose), set "dev": false.`;
@@ -491,7 +506,11 @@ CRITICAL RULES:
       if (plan && this._validatePlan(plan, testFilePath)) return plan;
       return null;
     } catch (error: any) {
+      const msg = (error.message || error).toString().toLowerCase();
       console.log(chalk.red(`\n✖ AI request failed: ${error.message || error}`));
+      if (msg.includes('balance') || msg.includes('429') || msg.includes('too many requests')) {
+         process.exit(1);
+      }
       return null;
     }
   }
@@ -507,7 +526,11 @@ Output ONLY the instruction string, nothing else.`;
       console.log(chalk.cyan(`  - 🧠 Analyzer Agent evaluating failure...`));
       const response = await askAI(this.config, 'Analyze failure and generate a self-correction instruction.', prompt);
       return response.trim();
-    } catch (e) {
+    } catch (error: any) {
+      const msg = (error.message || error).toString().toLowerCase();
+      if (msg.includes('balance') || msg.includes('429') || msg.includes('too many requests')) {
+         process.exit(1);
+      }
       return "CRITICAL SELF-CORRECTION: You are failing repeatedly. Pivot your strategy and stop repeating the same actions.";
     }
   }
@@ -528,17 +551,23 @@ Output ONLY the instruction string, nothing else.`;
 
   /** Validate that the plan only contains allowed actions and safe file paths. */
   private _validatePlan(plan: AgenticPlan, testFilePath: string): boolean {
-    const allowed = new Set(['replace_lines', 'install_deps', 'abort', 'read_file', 'list_dir', 'search_file', 'read_lines']);
+    const allowed = new Set(['replace_lines', 'install_deps', 'abort', 'read_file', 'list_dir', 'search_file', 'read_lines', 'generate_mock', 'delete_file']);
     for (const step of plan.steps) {
       if (!allowed.has(step.action)) return false;
-      if (step.action === 'replace_lines') {
+      if (step.action === 'replace_lines' || step.action === 'delete_file') {
         const abs = resolve(step.file);
         const isTestFile = abs === testFilePath;
         const isMockFile = abs.includes('__mocks__');
-        if (!isTestFile && !isMockFile) return false; // Strictly enforce only patching the test file or mock files
-        if (typeof (step as any).startLine !== 'number') return false;
-        if (typeof (step as any).endLine !== 'number') return false;
-        if (typeof (step as any).replacementCode !== 'string' && !Array.isArray((step as any).replacementCode)) return false;
+        const isConfigFile = abs.toLowerCase().includes('jest.config') || abs.toLowerCase().includes('setuptests') || abs.toLowerCase().includes('setup.js') || abs.toLowerCase().includes('setup.ts');
+        
+        if (step.action === 'delete_file') {
+           if (!isMockFile && !isConfigFile) return false;
+        } else {
+           if (!isTestFile && !isMockFile && !isConfigFile) return false; // Strictly enforce only patching the test file, mock files, or test config files
+           if (typeof (step as any).startLine !== 'number') return false;
+           if (typeof (step as any).endLine !== 'number') return false;
+           if (typeof (step as any).replacementCode !== 'string' && !Array.isArray((step as any).replacementCode)) return false;
+        }
       }
       if (step.action === 'install_deps') {
         if (!Array.isArray((step as any).deps)) return false;
@@ -585,13 +614,36 @@ Output ONLY the instruction string, nothing else.`;
           writeFileSync(step.file, lines.join('\n'), 'utf-8');
           break;
         }
+        case 'delete_file': {
+          if (existsSync(step.file)) {
+            const fs = await import('fs');
+            fs.unlinkSync(step.file);
+          }
+          break;
+        }
         case 'install_deps': {
           const deps = (step as any).deps.join(' ');
           const isDev = (step as any).dev !== false; // default to dev if not explicitly false
-          const saveFlag = isDev ? '--save-dev' : '--save';
+          
+          let installCmd = '';
+          const { detectProjectInfo } = await import('./detector.js');
+          const projectInfo = detectProjectInfo(process.cwd());
+          
+          if (projectInfo.packageManager === 'yarn') {
+             installCmd = `yarn add ${deps} ${isDev ? '--dev' : ''}`;
+          } else if (projectInfo.packageManager === 'pnpm') {
+             installCmd = `pnpm add ${deps} ${isDev ? '-D' : ''}`;
+          } else if (projectInfo.packageManager === 'bun') {
+             installCmd = `bun add ${deps} ${isDev ? '-d' : ''}`;
+          } else {
+             // Fallback to npm and use legacy-peer-deps to avoid ERESOLVE on older codebases
+             installCmd = `npm install ${isDev ? '--save-dev' : '--save'} ${deps} --legacy-peer-deps`;
+          }
+          
           try {
-            await execAsync(`npm install ${saveFlag} ${deps}`, { cwd: process.cwd() });
-          } catch (e) {
+            await execAsync(installCmd, { cwd: process.cwd() });
+          } catch (e: any) {
+            console.log(chalk.red(`  ✖ dependency install failed: ${e.message.split('\n')[0]}`));
             return 'abort';
           }
           break;

@@ -98,7 +98,11 @@ export async function generateTestForFile(
     const generatedCode = await askAI(config, promptInstructions, promptContext);
 
     if (generatedCode.includes('SKIP_FILE')) {
-      spinner.info(`Skipped ${relPath}: No testable logic found.`);
+      if (existingTestContext) {
+        spinner.info(`Skipped ${relPath}: Existing test suite already fully covers the code.`);
+      } else {
+        spinner.info(`Skipped ${relPath}: No testable logic found (likely pure types or exports).`);
+      }
       return 'skipped';
     }
 
@@ -198,8 +202,9 @@ export const generateCommand = new Command('generate')
           '**/__mocks__/**',
           '**/*.test.*',
           '**/*.spec.*',
-          '**/vite.config.*',
-          '**/tsup.config.*',
+          '**/*.config.*',
+          '**/setupTests.*',
+          '**/jest.setup.*',
           '**/.*'
         ],
         cwd: process.cwd()
