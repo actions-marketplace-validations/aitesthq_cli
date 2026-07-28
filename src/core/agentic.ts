@@ -90,7 +90,7 @@ export class AgenticPlanner {
 
   private async _runAgenticGeneratorLoop(sourceFilePath: string, testFilePath: string): Promise<'generated' | 'skipped' | 'failed'> {
     let attempts = 0;
-    const maxAttempts = 50; // Hard limit fallback to protect API billing
+    const maxAttempts = this.config.maxSteps !== undefined ? this.config.maxSteps : 50; // Configurable limit, fallback to 50 to protect API billing
     let stagnationCounter = 0;
     let previousStepsHash = '';
     let duplicateCount = 0;
@@ -112,12 +112,15 @@ export class AgenticPlanner {
 
     console.log(chalk.blue(`ℹ Starting Agentic Chunking Generator for ${sourceFilePath.split('/').pop()} (${fileLines.length} lines)...`));
     
-    console.log(chalk.blue(`ℹ Analyzing file architecture...`));
-    const astMap = generateASTMap(sourceFilePath);
-
     while (attempts < maxAttempts) {
       attempts++;
-      const plan = await this._requestGenPlan(testCode, testFilePath, sourceFilePath, fileLines.length, history, astMap);
+      
+      const testedFunctionsMatch = testCode.match(/describe\(['"\`](.+?)['"\`]\s*,/g) || [];
+      const testedFunctions = testedFunctionsMatch.map(s => s.replace(/describe\(['"\`]|['"\`]\s*,/g, '')).filter(s => s.trim().length > 0 && !s.includes('.js') && !s.includes('.ts'));
+      
+      const astMap = generateASTMap(sourceFilePath, testedFunctions);
+      
+      const plan = await this._requestGenPlan(testCode, testFilePath, sourceFilePath, fileLines.length, history, astMap, testedFunctions);
       if (!plan) {
         console.log(chalk.red(`✖ AI failed to generate a valid generation plan. Retrying...`));
         history.push(`Attempt ${attempts}: SYSTEM ERROR - Last response was invalid JSON. Ensure you output raw JSON only, and properly escape quotes/newlines in any arrays or strings.`);
@@ -199,14 +202,19 @@ export class AgenticPlanner {
     return testCode.trim().length > 0 ? 'generated' : 'failed';
   }
 
-  private async _requestGenPlan(testCode: string, testFilePath: string, sourceFilePath: string, totalLines: number, history: string[], astMap: string): Promise<any | null> {
+  private async _requestGenPlan(testCode: string, testFilePath: string, sourceFilePath: string, totalLines: number, history: string[], astMap: string, testedFunctions: string[]): Promise<any | null> {
     const historyToKeep = history.slice(-3);
     const historyContext = historyToKeep.length > 0 ? `\n--- RECENT ACTIONS & RESULTS (Last 3) ---\n${historyToKeep.join('\n\n')}\n` : '';
     const testFramework = this.projectInfo.testRunner === 'unknown' ? 'Jest' : this.projectInfo.testRunner;
     
+    const testedFunctionsContext = testedFunctions.length > 0 
+        ? `\n--- ALREADY TESTED FUNCTIONS (DO NOT TEST THESE AGAIN) ---\n${testedFunctions.join(', ')}\n` 
+        : '';
+
     const isCloud = this._isCloudProvider();
     const testLines = testCode.split('\n');
     let testContext = '';
+    
     if (!isCloud && testLines.length > 500) {
       const topLines = testLines.slice(0, 50).map((l, i) => `${i + 1}: ${l}`).join('\n');
       const bottomLines = testLines.slice(-200).map((l, i) => `${testLines.length - 200 + i + 1}: ${l}`).join('\n');
@@ -223,7 +231,7 @@ Total Lines: ${totalLines}
 Test Framework: ${testFramework}
 
 ${astMap}
-
+${testedFunctionsContext}
 ${testContext}
 ${historyContext}
 Your goal is to explore the target file chunk-by-chunk and incrementally build the test suite by appending test blocks.
@@ -233,7 +241,7 @@ The JSON must follow this exact schema:
   "reasoning": "<explain what you are looking for or writing>",
   "steps": [
     { "action": "read_lines", "start": <line number>, "end": <line number> }
-    | { "action": "append_test", "code": ["<valid", "code", "array>"] }
+    | { "action": "append_test", "code": "SEE_BELOW" }
     | { "action": "finish", "reason": "<explanation of completion>" }
     | { "action": "skip_file", "reason": "<explanation if file contains no testable logic (e.g. pure data/config)>" }
   ]
@@ -245,14 +253,32 @@ CRITICAL RULES:
 3. Use \`read_lines\` to read the implementation of a specific function based on the map's line numbers.
 4. After reading the implementation, use \`append_test\` to write the test case(s) for that specific function.
 5. If using \`append_test\`, ensure the code is a complete block (e.g. \`describe('...', () => { ... })\`).
-6. When you have tested all major exported functions in the map, use \`finish\`.`;
+6. When you have tested all major exported functions in the map, use \`finish\`.
+7. CRITICAL: For \`append_test\`, set the \`code\` field in the JSON exactly to the string "SEE_BELOW". Then, AFTER the JSON object, provide the actual test code wrapped in a standard markdown javascript code block (\`\`\`javascript ... \`\`\`). This prevents JSON parsing errors for large code blocks.`;
 
     try {
       const raw = await askAI(this.config, 'Generate a JSON plan for incremental test generation.', prompt);
-      const cleaned = raw.replace(/```json/g, '').replace(/```/g, '').trim();
+      
+      // Separate JSON from the code block to prevent greedy regex matching
+      const jsonPart = raw.split(/```(?:javascript|typescript|js|ts)/)[0];
+      const cleaned = jsonPart.replace(/```json/g, '').replace(/```/g, '').trim();
+      
       const match = cleaned.match(/\{[\s\S]*\}/);
       if (!match) return null;
-      return JSON.parse(match[0]);
+      
+      const plan = JSON.parse(match[0]);
+      
+      // Extract code block if it exists
+      const codeMatch = raw.match(/```(?:javascript|typescript|js|ts)\n([\s\S]*?)\n```/);
+      if (codeMatch && plan.steps) {
+        for (const step of plan.steps) {
+          if (step.action === 'append_test' && step.code === 'SEE_BELOW') {
+            step.code = codeMatch[1];
+          }
+        }
+      }
+      
+      return plan;
     } catch (error: any) {
       const msg = (error.message || error).toString().toLowerCase();
       console.log(chalk.red(`\n✖ AI generator request failed: ${error.message || error}`));
@@ -297,8 +323,10 @@ CRITICAL RULES:
       let planExecuted = false;
       let previousStepsHash = '';
       let duplicateCount = 0;
+      
+      const maxExplorationSteps = this.config.maxExplorationSteps !== undefined ? this.config.maxExplorationSteps : 5;
 
-      while (explorationAttempts < 5 && !planExecuted) {
+      while (explorationAttempts < maxExplorationSteps && !planExecuted) {
         explorationAttempts++;
         const plan = await this._requestPlan(lastError, testCode, testFilePath, history, sourceFilePath, explorationContext);
         if (!plan) {
@@ -475,7 +503,6 @@ CRITICAL RULES:
     }
     const workspaceContext = this.workspaceMap ? `\n--- WORKSPACE FILE STRUCTURE ---\n${this.workspaceMap}` : '';
     const explorationContextString = explorationContext ? `\n--- EXPLORATION CONTEXT ---\n${explorationContext}` : '';
-    
     const isCloud = this._isCloudProvider();
     const testLines = testCode.split('\n');
     let testContext = '';
@@ -491,7 +518,7 @@ CRITICAL RULES:
 --- ERROR OUTPUT ---
 ${errorOutput}${historyContext}
 Based on this information, suggest ONE JSON plan describing the next actionable step. The JSON must follow this schema:
-{ "reasoning": "<explain the failure and your fix or exploration strategy>", "steps": [ { "action": "replace_lines", "file": "<path to test file or mock file>", "startLine": <number>, "endLine": <number>, "replacementCode": ["const example = 1;", "module.exports = example;"] } | { "action": "search_file", "file": "<path>", "query": "<string to search for>" } | { "action": "read_lines", "file": "<path>", "startLine": <number>, "endLine": <number> } | { "action": "read_file", "path": "<relative path to file>" } | { "action": "list_dir", "path": "<relative path to dir>" } | { "action": "install_deps", "deps": ["<package>"], "dev": <boolean> } | { "action": "generate_mock", "target": "<package-name>", "type": "external" } | { "action": "delete_file", "file": "<path>" } | { "action": "abort", "reason": "<text>" } ] }
+{ "reasoning": "<explain the failure and your fix or exploration strategy>", "steps": [ { "action": "replace_lines", "file": "<path to test file or mock file>", "startLine": <number>, "endLine": <number>, "replacementCode": "SEE_BELOW" } | { "action": "search_file", "file": "<path>", "query": "<string to search for>" } | { "action": "read_lines", "file": "<path>", "startLine": <number>, "endLine": <number> } | { "action": "read_file", "path": "<relative path to file>" } | { "action": "list_dir", "path": "<relative path to dir>" } | { "action": "install_deps", "deps": ["<package>"], "dev": <boolean> } | { "action": "generate_mock", "target": "<package-name>", "type": "external" } | { "action": "delete_file", "file": "<path>" } | { "action": "abort", "reason": "<text>" } ] }
 CRITICAL RULES:
 1. To explore massive files safely, use "search_file" to find function signatures, then "read_lines" to read the implementation block. For small files, use "read_file". If you need to see what files exist in a directory, use "list_dir".
 2. You may ONLY patch the test file (${testFilePath}), files inside the __mocks__ directory, or test configuration/setup files (like jest.config.js or setupTests.js) using the "replace_lines" action. Do NOT modify the actual application source code. The "delete_file" action is ONLY allowed for removing broken files inside the __mocks__ directory or test configs.
@@ -499,7 +526,8 @@ CRITICAL RULES:
 4. If the test fails due to complex chained object queries (e.g. ORMs, query builders) or missing dependencies, return the "generate_mock" action. You can output multiple "generate_mock" actions in the same plan (e.g. one for an external library, one for an internal module, etc.) to instantly build global mocks instead of manually rewriting the test file.
 5. Do NOT wrap the JSON in markdown code blocks. Output ONLY the raw JSON object.
 6. If you cannot fix the issue, return an "abort" action.
-7. If using "install_deps" for testing libraries (like supertest or jest), set "dev": true. If installing application source dependencies (like express or mongoose), set "dev": false.`;
+7. If using "install_deps" for testing libraries (like supertest or jest), set "dev": true. If installing application source dependencies (like express or mongoose), set "dev": false.
+8. CRITICAL: For "replace_lines", set "replacementCode" exactly to the string "SEE_BELOW". Then, AFTER the JSON object, provide the actual replacement code wrapped in a standard markdown javascript code block (\`\`\`javascript ... \`\`\`). This prevents JSON parsing errors for multi-line code.`;
     try {
       const raw = await askAI(this.config, 'Generate a JSON plan to fix the failing test.', prompt);
       const plan = this._parsePlan(raw);
@@ -538,11 +566,25 @@ Output ONLY the instruction string, nothing else.`;
   /** Extract JSON from LLM response and parse it. */
   private _parsePlan(text: string): AgenticPlan | null {
     try {
-      const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
+      const jsonPart = text.split(/```(?:javascript|typescript|js|ts)/)[0];
+      const cleaned = jsonPart.replace(/```json/g, '').replace(/^```\n/gm, '').trim();
+      
       const match = cleaned.match(/\{[\s\S]*\}/);
       if (!match) return null;
       const obj = JSON.parse(match[0]);
-      if (obj && Array.isArray(obj.steps)) return obj as AgenticPlan;
+      
+      if (obj && Array.isArray(obj.steps)) {
+        // Extract code block if it exists
+        const codeMatch = text.match(/```(?:javascript|typescript|js|ts)\n([\s\S]*?)\n```/);
+        if (codeMatch) {
+          for (const step of obj.steps) {
+            if (step.action === 'replace_lines' && step.replacementCode === 'SEE_BELOW') {
+              step.replacementCode = codeMatch[1];
+            }
+          }
+        }
+        return obj as AgenticPlan;
+      }
     } catch (e) {
       // malformed JSON
     }

@@ -12,6 +12,8 @@ export interface AITestConfig {
   temperature?: number;
   autoFix?: boolean;
   maxRetries?: number;
+  maxSteps?: number;
+  maxExplorationSteps?: number;
 }
 
 const moduleName = 'aitest';

@@ -143,19 +143,24 @@ export function scanExternalDependencies(filePath: string): string[] {
   }
 }
 
-export function generateASTMap(filePath: string): string {
+export function generateASTMap(filePath: string, testedFunctions: string[] = []): string {
   try {
     const project = new Project();
     const sourceFile = project.addSourceFileAtPath(filePath);
     let output = '--- FILE STRUCTURE MAP ---\n';
     let itemCount = 0;
     const maxItems = 50;
+    let skippedCount = 0;
 
     const formatLines = (node: any) => `(Lines ${node.getStartLineNumber()} - ${node.getEndLineNumber()})`;
 
     for (const func of sourceFile.getFunctions()) {
       if (itemCount >= maxItems) break;
       const name = func.getName() || 'anonymous';
+      if (testedFunctions.includes(name)) {
+        skippedCount++;
+        continue;
+      }
       output += `- Function: \`${name}\` ${formatLines(func)}\n`;
       itemCount++;
     }
@@ -163,6 +168,10 @@ export function generateASTMap(filePath: string): string {
     for (const cls of sourceFile.getClasses()) {
       if (itemCount >= maxItems) break;
       const name = cls.getName() || 'anonymous';
+      if (testedFunctions.includes(name)) {
+        skippedCount++;
+        continue;
+      }
       output += `- Class: \`${name}\` ${formatLines(cls)}\n`;
       itemCount++;
       for (const method of cls.getMethods()) {
@@ -176,7 +185,12 @@ export function generateASTMap(filePath: string): string {
          // Skip require() statements to avoid cluttering the map with imports
          if (dec.getInitializer()?.getText().startsWith('require(')) continue;
          
-         output += `- Variable: \`${dec.getName()}\` ${formatLines(dec)}\n`;
+         const name = dec.getName();
+         if (testedFunctions.includes(name)) {
+           skippedCount++;
+           continue;
+         }
+         output += `- Variable: \`${name}\` ${formatLines(dec)}\n`;
          itemCount++;
       }
     }
@@ -196,12 +210,20 @@ export function generateASTMap(filePath: string): string {
                       if (prop.getKindName() === 'PropertyAssignment' || prop.getKindName() === 'MethodDeclaration' || prop.getKindName() === 'ShorthandPropertyAssignment') {
                          propName = (prop as any).getName();
                       }
+                      if (testedFunctions.includes(propName)) {
+                        skippedCount++;
+                        continue;
+                      }
                       output += `- Exported Member: \`${propName}\` ${formatLines(prop)}\n`;
                       itemCount++;
                    }
                 } else {
                    const name = left.replace('module.exports.', '').replace('exports.', '');
                    if (name && name !== 'module.exports') {
+                      if (testedFunctions.includes(name)) {
+                        skippedCount++;
+                        continue;
+                      }
                       output += `- Exported Member: \`${name}\` ${formatLines(stmt)}\n`;
                       itemCount++;
                    }
@@ -212,16 +234,14 @@ export function generateASTMap(filePath: string): string {
     }
 
     if (itemCount >= maxItems) {
-       output += `\n... [MAP TRUNCATED: File exports over ${maxItems} items. Focus on the available ones first.]`;
+       output += `\n... [MAP TRUNCATED: File exports over ${maxItems + skippedCount} items. (Skipped ${skippedCount} already tested items). Focus on the available ones first.]`;
     }
 
     if (itemCount === 0) {
-       output += "- No explicitly exported functions or classes detected. (This might be a pure execution script or dynamic export file).\n";
+       output += `No top-level functions, classes, or recognizable module.exports found. AI should rely on reading the file directly.\n`;
     }
 
     return output;
   } catch (error: any) {
-    logger.error(`AST Mapping failed for ${filePath}: ${error.message}`);
-    return '--- FILE STRUCTURE MAP ---\n- [AST Parser failed to map this file]\n';
   }
 }
