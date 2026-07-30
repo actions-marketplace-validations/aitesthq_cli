@@ -32,7 +32,8 @@ export async function generateTestForFile(
   const dir = dirname(filePath);
   const ext = extname(filePath);
   const name = basename(filePath, ext);
-  const testFilePath = resolve(dir, `${name}.test${ext}`);
+  const suffix = (projectInfo.framework === 'angular' || projectInfo.testRunner === 'vitest') ? '.spec' : '.test';
+  const testFilePath = resolve(dir, `${name}${suffix}${ext}`);
 
   const spinner = logger.spinner(`Analyzing ${relPath}...`).start();
 
@@ -92,7 +93,7 @@ export async function generateTestForFile(
       }
     } else {
       const testFramework = projectInfo.testRunner === 'unknown' ? 'Jest' : projectInfo.testRunner;
-      promptInstructions = `You are an expert QA and software testing engineer. Generate a comprehensive unit test suite for the provided code. Output ONLY valid executable code (with markdown code blocks) and nothing else. The target test framework is ${testFramework}. If the file is purely type definitions, interfaces, simple exports, or does not contain testable logic, reply ONLY with the exact string "SKIP_FILE" and do not generate any code. You will be provided with the target code and its imported dependencies to ensure you have the full architectural context.\nCRITICAL: Assume global mocks exist in the __mocks__ directory for all third-party libraries. DO NOT write massive inline mock implementations inside the test file. Rely on the global mocks and only write the pure unit test logic.\nCRITICAL: If the file represents a framework entry point or server initialization file, do NOT try to unit test internal plumbing with mocks. You MUST write an integration test (using tools like supertest if applicable).\nCRITICAL: If testing databases or ORMs, use standard mock techniques. If using Vitest, use vi.mocked() to mock imported functions to avoid TypeScript errors like 'Property does not exist on type'.`;
+      promptInstructions = `You are an expert QA and software testing engineer. Generate a comprehensive unit test suite for the provided code. Output ONLY valid executable code (with markdown code blocks) and nothing else. The target test framework is ${testFramework}. If the file is purely type definitions, interfaces, simple exports, or does not contain testable logic, reply ONLY with the exact string "SKIP_FILE" and do not generate any code. You will be provided with the target code and its imported dependencies to ensure you have the full architectural context.\nCRITICAL: Assume global mocks exist in the __mocks__ directory for all third-party libraries. DO NOT write massive inline mock implementations inside the test file. Rely on the global mocks and only write the pure unit test logic.\nCRITICAL: If the file represents a framework entry point or server initialization file, do NOT try to unit test internal plumbing with mocks. You MUST write an integration test (using tools like supertest if applicable).\nCRITICAL: If testing databases or ORMs, use standard mock techniques. If using Vitest, you MUST explicitly \`import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'\` at the top of the file, and use vi.mocked() to mock imported functions.`;
     }
 
     const generatedCode = await askAI(config, promptInstructions, promptContext);

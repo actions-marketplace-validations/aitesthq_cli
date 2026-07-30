@@ -7,7 +7,8 @@ import { promisify } from 'util';
 import { writeFileSync, readFileSync, existsSync, readdirSync, mkdirSync } from 'fs';
 import { resolve, dirname, join, basename } from 'path';
 import { generateTestForFile } from '../commands/generate.js';
-import { generateASTMap } from '../core/scanner.js';
+import { scanDependencies, generateWorkspaceMap, generateASTMap, generateKnowledgeGraph } from '../core/scanner.js';
+import { Project, ts } from 'ts-morph';
 import chalk from 'chalk';
 
 const execAsync = promisify(exec);
@@ -118,7 +119,7 @@ export class AgenticPlanner {
       const testedFunctionsMatch = testCode.match(/describe\(['"\`](.+?)['"\`]\s*,/g) || [];
       const testedFunctions = testedFunctionsMatch.map(s => s.replace(/describe\(['"\`]|['"\`]\s*,/g, '')).filter(s => s.trim().length > 0 && !s.includes('.js') && !s.includes('.ts'));
       
-      const astMap = generateASTMap(sourceFilePath, testedFunctions);
+      const astMap = generateKnowledgeGraph(sourceFilePath, testedFunctions);
       
       const plan = await this._requestGenPlan(testCode, testFilePath, sourceFilePath, fileLines.length, history, astMap, testedFunctions);
       if (!plan) {
@@ -162,14 +163,32 @@ export class AgenticPlanner {
         } else if (step.action === 'append_test') {
           console.log(chalk.cyan(`  - 📝 Appending test code chunk`));
           const codeToAppend = Array.isArray(step.code) ? step.code.join('\n') : step.code;
-          testCode += '\n' + codeToAppend;
-          writeFileSync(testFilePath, testCode, 'utf-8');
-          history.push(`Attempt ${attempts}: Appended test code.`);
-          madeProgress = true;
+          const proposedTestCode = testCode + '\n' + codeToAppend;
+          
+          const syntaxCheckProject = new Project();
+          const sf = syntaxCheckProject.createSourceFile('syntax_check.ts', proposedTestCode, { overwrite: true });
+          const syntaxErrs = sf.getPreEmitDiagnostics().filter(d => d.getCategory() === ts.DiagnosticCategory.Error && d.getCode() >= 1000 && d.getCode() < 2000);
+          
+          if (syntaxErrs.length > 0) {
+            const errMsgs = syntaxErrs.map(e => e.getMessageText()).join(', ');
+            console.log(chalk.red(`  - ✖ Pre-commit Syntax Check Failed: ${errMsgs}`));
+            history.push(`Attempt ${attempts}: Failed to append test due to syntax error: ${errMsgs}. Ensure all brackets are closed correctly.`);
+          } else {
+            testCode = proposedTestCode;
+            writeFileSync(testFilePath, testCode, 'utf-8');
+            history.push(`Attempt ${attempts}: Appended test code.`);
+            madeProgress = true;
+          }
         } else if (step.action === 'finish') {
-          console.log(chalk.green(`  - ✅ AI finished generating the test file.`));
-          history.push(`Attempt ${attempts}: Finished. Reason: ${step.reason}`);
-          isFinished = true;
+          if (astMap.includes('"truncated": true')) {
+             console.log(chalk.yellow(`  - 🔄 AI finished current chunk. Fetching next chunk of functions...`));
+             history.push(`Attempt ${attempts}: Finished current chunk. Map is truncated, continuing to next batch.`);
+             madeProgress = true;
+          } else {
+             console.log(chalk.green(`  - ✅ AI finished generating the test file.`));
+             history.push(`Attempt ${attempts}: Finished. Reason: ${step.reason}`);
+             isFinished = true;
+          }
         } else if (step.action === 'skip_file') {
           console.log(chalk.yellow(`  - ⏭ Skipped: ${step.reason}`));
           return 'skipped';
@@ -197,6 +216,42 @@ export class AgenticPlanner {
     
     if (attempts >= maxAttempts) {
        console.log(chalk.yellow(`\n⚠ Reached maximum limit of ${maxAttempts} attempts. Safe breaking. To continue generating coverage, run the command again.`));
+    }
+    
+    // Auto-Bracket Fixer (Lexical Balancer)
+    if (testCode.trim().length > 0) {
+      const project = new Project();
+      const checkSyntax = (c: string) => {
+         const sf = project.createSourceFile('syntax_check.ts', c, { overwrite: true });
+         const errs = sf.getPreEmitDiagnostics().filter(d => d.getCategory() === ts.DiagnosticCategory.Error && d.getCode() >= 1000 && d.getCode() < 2000);
+         return errs.length === 0;
+      };
+      
+      if (!checkSyntax(testCode)) {
+         console.log(chalk.yellow(`\n⚠ Syntax Error detected at End-Of-File. Engaging Auto-Bracket Fixer...`));
+         const closures = [
+           '\n});\n',
+           '\n}\n',
+           '\n});\n});\n',
+           '\n}\n});\n',
+           '\n});\n});\n});\n',
+           '\n}\n}\n',
+           '\n});\n});\n});\n});\n'
+         ];
+         let fixed = false;
+         for (const closure of closures) {
+           if (checkSyntax(testCode + closure)) {
+             testCode += closure;
+             writeFileSync(testFilePath, testCode, 'utf-8');
+             console.log(chalk.green(`  ✔ Auto-Bracket Fixer successfully balanced the file braces.`));
+             fixed = true;
+             break;
+           }
+         }
+         if (!fixed) {
+           console.log(chalk.red(`  ✖ Auto-Bracket Fixer failed to balance braces automatically.`));
+         }
+      }
     }
     
     return testCode.trim().length > 0 ? 'generated' : 'failed';
@@ -230,6 +285,8 @@ File: ${sourceFilePath}
 Total Lines: ${totalLines}
 Test Framework: ${testFramework}
 
+--- JSON KNOWLEDGE GRAPH ---
+(This graph maps the internal functions and external dependencies of the UNTESTED chunks in this file. Use the "edges" array to see exactly what external dependencies a function CALLS, and mock those dependencies BEFORE writing the test to avoid failures!)
 ${astMap}
 ${testedFunctionsContext}
 ${testContext}
@@ -248,32 +305,59 @@ The JSON must follow this exact schema:
 }
 
 CRITICAL RULES:
-1. Do NOT wrap the JSON in markdown blocks. Output ONLY raw JSON.
+1. Do NOT wrap the JSON object in markdown backticks (i.e. no \`\`\`json).
 2. Use the FILE STRUCTURE MAP provided above to identify exported functions and their exact line numbers. Do NOT search for functions manually.
 3. Use \`read_lines\` to read the implementation of a specific function based on the map's line numbers.
 4. After reading the implementation, use \`append_test\` to write the test case(s) for that specific function.
 5. If using \`append_test\`, ensure the code is a complete block (e.g. \`describe('...', () => { ... })\`).
-6. When you have tested all major exported functions in the map, use \`finish\`.
-7. CRITICAL: For \`append_test\`, set the \`code\` field in the JSON exactly to the string "SEE_BELOW". Then, AFTER the JSON object, provide the actual test code wrapped in a standard markdown javascript code block (\`\`\`javascript ... \`\`\`). This prevents JSON parsing errors for large code blocks.`;
+6. DO NOT write massive inline mock implementations inside the test file unless absolutely necessary. Rely on the global mocks.
+7. CRITICAL: For \`append_test\`, set the \`code\` field in the JSON exactly to the string "SEE_BELOW". Then, IMMEDIATELY AFTER the JSON object, provide the actual test code wrapped in a standard markdown block (\`\`\` ... \`\`\`). If you have multiple "SEE_BELOW" occurrences in your JSON, you MUST provide multiple sequential markdown code blocks after the JSON, in the exact same order.
+8. CRITICAL: If the JSON KNOWLEDGE GRAPH indicates that it is "truncated", DO NOT attempt to manually read lines beyond the mapped functions to discover more. Focus ONLY on testing the available mapped functions and then use \`finish\`. The graph will automatically refresh with the next batch of functions in the next execution.
+9. CRITICAL: If the test framework is Vitest, you MUST explicitly \`import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'\` at the top of the test code when generating new test blocks.
+
+REQUIRED OUTPUT FORMAT:
+If using \`append_test\`, format your response EXACTLY like this:
+{
+  "reasoning": "...",
+  "steps": [
+    { "action": "append_test", "code": "SEE_BELOW" }
+  ]
+}
+\`\`\`typescript
+// Your test code here (adapt to the project's testing framework)
+\`\`\`
+`;
 
     try {
       const raw = await askAI(this.config, 'Generate a JSON plan for incremental test generation.', prompt);
       
-      // Separate JSON from the code block to prevent greedy regex matching
-      const jsonPart = raw.split(/```(?:javascript|typescript|js|ts)/)[0];
-      const cleaned = jsonPart.replace(/```json/g, '').replace(/```/g, '').trim();
-      
-      const match = cleaned.match(/\{[\s\S]*\}/);
+      const jsonPart = raw.split(/```[ \t]*(?:javascript|typescript|js|ts)?[ \t]*\r?\n/i)[0];
+      const match = jsonPart.match(/\{[\s\S]*\}/);
       if (!match) return null;
       
       const plan = JSON.parse(match[0]);
       
-      // Extract code block if it exists
-      const codeMatch = raw.match(/```(?:javascript|typescript|js|ts)\n([\s\S]*?)\n```/);
-      if (codeMatch && plan.steps) {
+      const jsonStartIndex = raw.indexOf(match[0]);
+      const jsonEndIndex = jsonStartIndex + match[0].length;
+      const textBeforeJson = raw.substring(0, jsonStartIndex);
+      let textAfterJson = raw.substring(jsonEndIndex);
+      
+      if (textBeforeJson.includes('```')) {
+         textAfterJson = textAfterJson.replace(/^[ \t]*\r?\n?```/, '');
+      }
+      
+      const blocks = [...textAfterJson.matchAll(/```[^\n]*\n([\s\S]*?)\r?\n?```/gi)];
+      let blockIndex = 0;
+      
+      if (plan.steps) {
         for (const step of plan.steps) {
           if (step.action === 'append_test' && step.code === 'SEE_BELOW') {
-            step.code = codeMatch[1];
+            if (blockIndex < blocks.length) {
+              step.code = blocks[blockIndex][1];
+              blockIndex++;
+            } else {
+              throw new Error("Missing markdown code block for SEE_BELOW. You MUST provide the code inside a standard markdown block after the JSON.\nRAW OUTPUT:\n" + raw);
+            }
           }
         }
       }
@@ -324,16 +408,24 @@ CRITICAL RULES:
       let previousStepsHash = '';
       let duplicateCount = 0;
       
+      const astMap = sourceFilePath ? generateKnowledgeGraph(sourceFilePath, [], 30) : '';
+      
       const maxExplorationSteps = this.config.maxExplorationSteps !== undefined ? this.config.maxExplorationSteps : 5;
 
       while (explorationAttempts < maxExplorationSteps && !planExecuted) {
         explorationAttempts++;
-        const plan = await this._requestPlan(lastError, testCode, testFilePath, history, sourceFilePath, explorationContext);
-        if (!plan) {
+        const result = await this._requestPlan(lastError, testCode, testFilePath, history, sourceFilePath, explorationContext, astMap);
+        if (!result || result.error || !result.plan) {
           console.log(chalk.red(`✖ AI failed to generate a valid plan. Retrying...`));
-          explorationContext += `\n--- SYSTEM ERROR ---\nYour last response was not valid JSON. Ensure you output raw JSON only, and properly escape quotes and newlines in any strings (especially replacementCode).\n`;
+          const errMsg = result?.error || "Your last response was not valid JSON or was missing a markdown code block. Ensure you output raw JSON only, and properly wrap replacement code in standard markdown blocks.";
+          console.log(chalk.red(`  Reason: ${errMsg}`));
+
+          explorationContext += `\n--- SYSTEM ERROR ---\n${errMsg}\n`;
           continue;
         }
+        
+        const plan = result.plan;
+        console.log(chalk.cyan(`🤖 AI returned a plan:`));
         
         const currentStepsHash = JSON.stringify(plan.steps);
         if (currentStepsHash === previousStepsHash) {
@@ -346,8 +438,6 @@ CRITICAL RULES:
           duplicateCount = 0;
           previousStepsHash = currentStepsHash;
         }
-
-        console.log(chalk.cyan(`🤖 AI returned a plan:`));
         if (plan.reasoning) {
           console.log(chalk.gray(`  🤔 Reasoning: ${plan.reasoning}`));
         }
@@ -416,6 +506,10 @@ CRITICAL RULES:
                console.log(chalk.red(`✖ AI generated the exact same patch 3 times in a row. Forcibly breaking infinite loop.`));
                return 'failed';
             }
+          } else if (step.action === 'generate_mock') {
+            needsToBreakAndRunTests = true;
+            console.log(chalk.magenta(`  - 🛠 Auto-Mocking missing dependency: ${(step as any).target}`));
+            history.push(`Attempt ${attempts}: Auto-Mocked missing dependency ${(step as any).target}`);
           } else if (step.action === 'install_deps') {
             needsToBreakAndRunTests = true;
             console.log(chalk.cyan(`  - 📦 Install dependencies: ${step.deps.join(', ')}`));
@@ -467,7 +561,7 @@ CRITICAL RULES:
     return 'failed'; // exhausted attempts
   }
 
-  /** Derive the .test.* filename from a source file path. */
+  /** Derive the .test.* or .spec.* filename from a source file path. */
   private _deriveTestPath(sourceFilePath: string): string {
     const ext = sourceFilePath.substring(sourceFilePath.lastIndexOf('.'));
     const base = sourceFilePath.substring(
@@ -475,11 +569,12 @@ CRITICAL RULES:
       sourceFilePath.length - ext.length
     );
     const dir = dirname(sourceFilePath);
-    return resolve(dir, `${base}.test${ext}`);
+    const suffix = (this.projectInfo.framework === 'angular' || this.projectInfo.testRunner === 'vitest') ? '.spec' : '.test';
+    return resolve(dir, `${base}${suffix}${ext}`);
   }
 
   /** Prompt the LLM for a JSON plan based on a failed test run. */
-  private async _requestPlan(errorOutput: string, testCode: string, testFilePath: string, history: string[], sourceFilePath?: string, explorationContext: string = ''): Promise<AgenticPlan | null> {
+  private async _requestPlan(errorOutput: string, testCode: string, testFilePath: string, history: string[], sourceFilePath?: string, explorationContext: string = '', astMap: string = ''): Promise<{ plan?: AgenticPlan, error?: string }> {
     let historyContext = '';
     if (history.length > 0) {
       historyContext = `\n--- PREVIOUS ACTIONS TAKEN ---\n${history.join('\n')}\nWARNING: The test is still failing. Do NOT suggest the exact same action again.`;
@@ -503,6 +598,7 @@ CRITICAL RULES:
     }
     const workspaceContext = this.workspaceMap ? `\n--- WORKSPACE FILE STRUCTURE ---\n${this.workspaceMap}` : '';
     const explorationContextString = explorationContext ? `\n--- EXPLORATION CONTEXT ---\n${explorationContext}` : '';
+    const astContext = astMap ? `\n--- JSON KNOWLEDGE GRAPH ---\n(This graph maps the internal functions and external dependencies (the "CALLS" edges) of the file. Use this to identify exactly what external or internal modules need to be mocked!)\n${astMap}\n` : '';
     const isCloud = this._isCloudProvider();
     const testLines = testCode.split('\n');
     let testContext = '';
@@ -514,7 +610,7 @@ CRITICAL RULES:
       testContext = `\n--- TEST FILE (${testFilePath}) ---\n${testCodeWithLines}`;
     }
 
-    const prompt = `You are an expert QA engineer. The following test has failed.${sourceContext}${workspaceContext}${explorationContextString}${testContext}
+    const prompt = `You are an expert QA engineer. The following test has failed.${sourceContext}${astContext}${workspaceContext}${explorationContextString}${testContext}
 --- ERROR OUTPUT ---
 ${errorOutput}${historyContext}
 Based on this information, suggest ONE JSON plan describing the next actionable step. The JSON must follow this schema:
@@ -523,23 +619,54 @@ CRITICAL RULES:
 1. To explore massive files safely, use "search_file" to find function signatures, then "read_lines" to read the implementation block. For small files, use "read_file". If you need to see what files exist in a directory, use "list_dir".
 2. You may ONLY patch the test file (${testFilePath}), files inside the __mocks__ directory, or test configuration/setup files (like jest.config.js or setupTests.js) using the "replace_lines" action. Do NOT modify the actual application source code. The "delete_file" action is ONLY allowed for removing broken files inside the __mocks__ directory or test configs.
 3. For "replace_lines", provide the exact startLine and endLine numbers based on the line numbers shown in the TEST FILE block. To insert code without removing any lines, set startLine and endLine to the line number where you want to insert.
-4. If the test fails due to complex chained object queries (e.g. ORMs, query builders) or missing dependencies, return the "generate_mock" action. You can output multiple "generate_mock" actions in the same plan (e.g. one for an external library, one for an internal module, etc.) to instantly build global mocks instead of manually rewriting the test file.
-5. Do NOT wrap the JSON in markdown code blocks. Output ONLY the raw JSON object.
+4. If the test fails due to complex chained object queries (e.g. ORMs, query builders) or missing dependencies, return the "generate_mock" action. Use the JSON KNOWLEDGE GRAPH's "CALLS" edges to see exactly what dependencies the file requires, and generate mocks for them BEFORE blindly deleting code blocks. You can output multiple "generate_mock" actions in the same plan.
+5. Do NOT wrap the JSON object in markdown backticks (i.e. no \`\`\`json).
 6. If you cannot fix the issue, return an "abort" action.
 7. If using "install_deps" for testing libraries (like supertest or jest), set "dev": true. If installing application source dependencies (like express or mongoose), set "dev": false.
-8. CRITICAL: For "replace_lines", set "replacementCode" exactly to the string "SEE_BELOW". Then, AFTER the JSON object, provide the actual replacement code wrapped in a standard markdown javascript code block (\`\`\`javascript ... \`\`\`). This prevents JSON parsing errors for multi-line code.`;
+8. CRITICAL: If the test framework is Vitest, ensure the test file explicitly imports { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'. If it is missing and causing a "describe is not defined" error, use "replace_lines" to insert the import at the top of the file.
+9. CRITICAL: Do NOT put code snippets or literal newlines inside the "reasoning" JSON string. Keep the reasoning concise.
+10. CRITICAL: For "replace_lines", if you are inserting or replacing code, set "replacementCode" exactly to the string "SEE_BELOW". If you are ONLY deleting lines, set "replacementCode" to "". 
+If you use "SEE_BELOW", you MUST provide the actual replacement code wrapped in a standard markdown block (\`\`\` ... \`\`\`) IMMEDIATELY AFTER the JSON object. 
+If you have multiple "SEE_BELOW" occurrences in your JSON, you MUST provide multiple sequential markdown code blocks after the JSON, in the exact same order.
+
+REQUIRED OUTPUT FORMAT:
+If using "replace_lines", format your response EXACTLY like this:
+{
+  "reasoning": "...",
+  "steps": [
+    {
+      "action": "replace_lines",
+      "file": "/path/to/file",
+      "startLine": 1,
+      "endLine": 5,
+      "replacementCode": "SEE_BELOW"
+    }
+  ]
+}
+\`\`\`typescript
+// Your replacement code here
+\`\`\`
+`;
     try {
       const raw = await askAI(this.config, 'Generate a JSON plan to fix the failing test.', prompt);
-      const plan = this._parsePlan(raw);
-      if (plan && this._validatePlan(plan, testFilePath)) return plan;
-      return null;
+      const parseResult = this._parsePlan(raw);
+      if (parseResult.error || !parseResult.plan) {
+         return { error: parseResult.error, raw };
+      }
+      
+      const validationError = this._validatePlan(parseResult.plan, testFilePath);
+      if (validationError) {
+         return { error: validationError, raw };
+      }
+      
+      return { plan: parseResult.plan, raw };
     } catch (error: any) {
       const msg = (error.message || error).toString().toLowerCase();
       console.log(chalk.red(`\n✖ AI request failed: ${error.message || error}`));
       if (msg.includes('balance') || msg.includes('429') || msg.includes('too many requests')) {
          process.exit(1);
       }
-      return null;
+      return { error: msg };
     }
   }
 
@@ -564,38 +691,57 @@ Output ONLY the instruction string, nothing else.`;
   }
 
   /** Extract JSON from LLM response and parse it. */
-  private _parsePlan(text: string): AgenticPlan | null {
+  private _parsePlan(text: string): { plan?: AgenticPlan, error?: string } {
     try {
-      const jsonPart = text.split(/```(?:javascript|typescript|js|ts)/)[0];
-      const cleaned = jsonPart.replace(/```json/g, '').replace(/^```\n/gm, '').trim();
+      const jsonPart = text.split(/```[ \t]*(?:javascript|typescript|js|ts)?[ \t]*\r?\n/i)[0];
+      const match = jsonPart.match(/\{[\s\S]*\}/);
+      if (!match) return { error: "No JSON object found in your response." };
       
-      const match = cleaned.match(/\{[\s\S]*\}/);
-      if (!match) return null;
-      const obj = JSON.parse(match[0]);
+      let obj;
+      try {
+        obj = JSON.parse(match[0]);
+      } catch (e: any) {
+        return { error: `Invalid JSON syntax: ${e.message}. Ensure strings are escaped correctly.` };
+      }
       
       if (obj && Array.isArray(obj.steps)) {
-        // Extract code block if it exists
-        const codeMatch = text.match(/```(?:javascript|typescript|js|ts)\n([\s\S]*?)\n```/);
-        if (codeMatch) {
-          for (const step of obj.steps) {
-            if (step.action === 'replace_lines' && step.replacementCode === 'SEE_BELOW') {
-              step.replacementCode = codeMatch[1];
+        const jsonStartIndex = text.indexOf(match[0]);
+        const jsonEndIndex = jsonStartIndex + match[0].length;
+        const textBeforeJson = text.substring(0, jsonStartIndex);
+        let textAfterJson = text.substring(jsonEndIndex);
+        
+        if (textBeforeJson.includes('```')) {
+           textAfterJson = textAfterJson.replace(/^[ \t]*\r?\n?```/, '');
+        }
+        
+        const blocks = [...textAfterJson.matchAll(/```[^\n]*\n([\s\S]*?)\r?\n?```/gi)];
+        let blockIndex = 0;
+        
+        for (const step of obj.steps) {
+          if (step.action === 'replace_lines' && step.replacementCode === 'SEE_BELOW') {
+            if (blockIndex < blocks.length) {
+              step.replacementCode = blocks[blockIndex][1];
+              blockIndex++;
+            } else {
+              const expectedCount = obj.steps.filter((s: any) => s.action === 'replace_lines' && s.replacementCode === 'SEE_BELOW').length;
+              return { error: `Missing markdown code block for SEE_BELOW. Your JSON specified ${expectedCount} "SEE_BELOW" occurrences, but you only provided ${blockIndex} markdown code block(s) after the JSON. You MUST provide exactly one markdown code block for each SEE_BELOW.` };
             }
           }
         }
-        return obj as AgenticPlan;
+        return { plan: obj as AgenticPlan };
       }
-    } catch (e) {
-      // malformed JSON
+      return { error: "JSON must contain a 'steps' array." };
+    } catch (e: any) {
+      return { error: `Parsing error: ${e.message}` };
     }
-    return null;
   }
 
   /** Validate that the plan only contains allowed actions and safe file paths. */
-  private _validatePlan(plan: AgenticPlan, testFilePath: string): boolean {
+  private _validatePlan(plan: AgenticPlan, testFilePath: string): string | null {
     const allowed = new Set(['replace_lines', 'install_deps', 'abort', 'read_file', 'list_dir', 'search_file', 'read_lines', 'generate_mock', 'delete_file']);
     for (const step of plan.steps) {
-      if (!allowed.has(step.action)) return false;
+      if (!allowed.has(step.action)) return `Invalid action: ${step.action}. Allowed actions are: ${Array.from(allowed).join(', ')}`;
+      
       if (step.action === 'replace_lines' || step.action === 'delete_file') {
         const abs = resolve(step.file);
         const isTestFile = abs === testFilePath;
@@ -603,35 +749,35 @@ Output ONLY the instruction string, nothing else.`;
         const isConfigFile = abs.toLowerCase().includes('jest.config') || abs.toLowerCase().includes('setuptests') || abs.toLowerCase().includes('setup.js') || abs.toLowerCase().includes('setup.ts');
         
         if (step.action === 'delete_file') {
-           if (!isMockFile && !isConfigFile) return false;
+           if (!isMockFile && !isConfigFile) return `Validation failed for 'delete_file'. You may ONLY delete files inside __mocks__ or test configs. You attempted to delete: ${step.file}`;
         } else {
-           if (!isTestFile && !isMockFile && !isConfigFile) return false; // Strictly enforce only patching the test file, mock files, or test config files
-           if (typeof (step as any).startLine !== 'number') return false;
-           if (typeof (step as any).endLine !== 'number') return false;
-           if (typeof (step as any).replacementCode !== 'string' && !Array.isArray((step as any).replacementCode)) return false;
+           if (!isTestFile && !isMockFile && !isConfigFile) return `Validation failed for 'replace_lines'. RULE VIOLATION: You may ONLY patch the test file (${testFilePath}), files inside __mocks__, or test configs. You attempted to patch application source code: ${step.file}. Do NOT modify application source code!`;
+           if (typeof (step as any).startLine !== 'number') return `Validation failed for 'replace_lines': 'startLine' must be a number.`;
+           if (typeof (step as any).endLine !== 'number') return `Validation failed for 'replace_lines': 'endLine' must be a number.`;
+           if (typeof (step as any).replacementCode !== 'string' && !Array.isArray((step as any).replacementCode)) return `Validation failed for 'replace_lines': 'replacementCode' must be a string or array of strings.`;
         }
       }
       if (step.action === 'install_deps') {
-        if (!Array.isArray((step as any).deps)) return false;
+        if (!Array.isArray((step as any).deps)) return `Validation failed for 'install_deps': 'deps' must be an array of strings.`;
       }
       if (step.action === 'read_file' || step.action === 'list_dir') {
-        if (typeof (step as any).path !== 'string') return false;
+        if (typeof (step as any).path !== 'string') return `Validation failed for '${step.action}': 'path' must be a string.`;
       }
       if (step.action === 'search_file') {
-        if (typeof (step as any).file !== 'string') return false;
-        if (typeof (step as any).query !== 'string') return false;
+        if (typeof (step as any).file !== 'string') return `Validation failed for 'search_file': 'file' must be a string.`;
+        if (typeof (step as any).query !== 'string') return `Validation failed for 'search_file': 'query' must be a string.`;
       }
       if (step.action === 'read_lines') {
-        if (typeof (step as any).file !== 'string') return false;
-        if (typeof (step as any).startLine !== 'number') return false;
-        if (typeof (step as any).endLine !== 'number') return false;
+        if (typeof (step as any).file !== 'string') return `Validation failed for 'read_lines': 'file' must be a string.`;
+        if (typeof (step as any).startLine !== 'number') return `Validation failed for 'read_lines': 'startLine' must be a number.`;
+        if (typeof (step as any).endLine !== 'number') return `Validation failed for 'read_lines': 'endLine' must be a number.`;
       }
       if (step.action === 'generate_mock') {
-        if (typeof (step as any).target !== 'string') return false;
-        if ((step as any).type !== 'external' && (step as any).type !== 'internal') return false;
+        if (typeof (step as any).target !== 'string') return `Validation failed for 'generate_mock': 'target' must be a string.`;
+        if ((step as any).type !== 'external' && (step as any).type !== 'internal') return `Validation failed for 'generate_mock': 'type' must be either 'external' or 'internal'.`;
       }
     }
-    return true;
+    return null;
   }
 
   /** Execute a validated plan step‑by‑step. */

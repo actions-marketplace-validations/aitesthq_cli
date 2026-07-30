@@ -127,13 +127,6 @@ AI Test CLI is built with strict API billing safeguards:
 
 ---
 
-## ☕ Support the Project
-
-Did AI Test CLI just save you 20 hours of grueling unit testing? Support the creator and buy them a coffee!
-
-<a href="https://buymeacoffee.com/cijaytechnh" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
-
----
 
 ## 📄 License
 

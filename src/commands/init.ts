@@ -132,7 +132,9 @@ export const initCommand = new Command('init')
       customHeaders: parsedHeaders,
       temperature: 0.1,
       autoFix: true,
-      maxRetries: -1 // Infinite by default
+      maxRetries: -1, // Infinite by default
+      maxSteps: 50,
+      maxExplorationSteps: 5
     };
 
     await saveConfig(config);

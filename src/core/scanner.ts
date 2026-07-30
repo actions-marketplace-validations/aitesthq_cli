@@ -1,4 +1,4 @@
-import { Project } from 'ts-morph';
+import { Project, Node, SyntaxKind } from 'ts-morph';
 import { existsSync, readFileSync, statSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { logger } from './logger.js';
@@ -243,5 +243,161 @@ export function generateASTMap(filePath: string, testedFunctions: string[] = [])
 
     return output;
   } catch (error: any) {
+  }
+}
+
+export function generateKnowledgeGraph(filePath: string, testedFunctions: string[] = [], maxItems: number = 10): string {
+  try {
+    const project = new Project();
+    const sourceFile = project.addSourceFileAtPath(filePath);
+    
+    const nodes = new Map<string, any>();
+    const edges: any[] = [];
+    
+    let itemCount = 0;
+    
+    function addNode(id: string, type: string, file: string, exported: boolean = false, lineStart?: number, lineEnd?: number) {
+      if (!nodes.has(id)) nodes.set(id, { id, type, file, exported, lineStart, lineEnd });
+    }
+
+    function addEdge(from: string, to: string, relation: string) {
+      if (!edges.some(e => e.from === from && e.to === to && e.relation === relation)) {
+          edges.push({ from, to, relation });
+      }
+    }
+    
+    function processNode(node: Node, currentId: string, depth: number) {
+      if (depth > 2) return;
+      
+      const calls = node.getDescendantsOfKind(SyntaxKind.CallExpression);
+      for (const call of calls) {
+        const expr = call.getExpression();
+        
+        let symbol: any = null;
+        try {
+          symbol = expr.getSymbol();
+        } catch (e) {
+          // Ignore symbol resolution crashes on massive untyped JS files
+        }
+
+        
+        let targetName = expr.getText();
+        let targetFile = 'unknown';
+        let type = 'external_dependency';
+        
+        if (symbol) {
+          const decls = symbol.getDeclarations();
+          if (decls && decls.length > 0) {
+            const decl = decls[0];
+            targetFile = decl.getSourceFile().getBaseName();
+            targetName = symbol.getName();
+            if (targetFile === sourceFile.getBaseName()) {
+              type = 'internal_dependency';
+            }
+          }
+        }
+        
+        if (targetName.length > 30) targetName = targetName.substring(0, 30) + '...';
+        
+        const targetId = `${targetFile}:${targetName}`;
+        addNode(targetId, type, targetFile);
+        addEdge(currentId, targetId, 'CALLS');
+      }
+    }
+
+    for (const func of sourceFile.getFunctions()) {
+      if (itemCount >= maxItems) break;
+      const name = func.getName() || 'anonymous';
+      if (!testedFunctions.some(t => t.includes(name))) {
+         const id = `${sourceFile.getBaseName()}:${name}`;
+         addNode(id, 'function', sourceFile.getBaseName(), func.isExported(), func.getStartLineNumber(), func.getEndLineNumber());
+         processNode(func, id, 1);
+         itemCount++;
+      }
+    }
+
+    for (const cls of sourceFile.getClasses()) {
+      for (const method of cls.getMethods()) {
+          if (itemCount >= maxItems) break;
+          const name = method.getName();
+          if (!testedFunctions.some(t => t.includes(name))) {
+              const id = `${sourceFile.getBaseName()}:${name}`;
+              addNode(id, 'method', sourceFile.getBaseName(), cls.isExported(), method.getStartLineNumber(), method.getEndLineNumber());
+              processNode(method, id, 1);
+              itemCount++;
+          }
+      }
+    }
+    
+    for (const variable of sourceFile.getVariableStatements()) {
+      if (itemCount >= maxItems) break;
+      for (const dec of variable.getDeclarations()) {
+         if (dec.getInitializer()?.getText().startsWith('require(')) continue;
+         const name = dec.getName();
+         if (!testedFunctions.some(t => t.includes(name))) {
+             const id = `${sourceFile.getBaseName()}:${name}`;
+             addNode(id, 'variable', sourceFile.getBaseName(), variable.isExported(), dec.getStartLineNumber(), dec.getEndLineNumber());
+             processNode(dec, id, 1);
+             itemCount++;
+         }
+      }
+    }
+    
+    for (const stmt of sourceFile.getStatements()) {
+       if (itemCount >= maxItems) break;
+       if (stmt.getKindName() === 'ExpressionStatement') {
+          const expr = (stmt as any).getExpression();
+          if (expr && expr.getKindName() === 'BinaryExpression') {
+             const left = expr.getLeft().getText();
+             if (left.startsWith('module.exports') || left.startsWith('exports.')) {
+                const right = expr.getRight();
+                if (right.getKindName() === 'ObjectLiteralExpression') {
+                   for (const prop of right.getProperties()) {
+                      if (itemCount >= maxItems) break;
+                      let propName = 'unknown';
+                      if (prop.getKindName() === 'PropertyAssignment' || prop.getKindName() === 'MethodDeclaration' || prop.getKindName() === 'ShorthandPropertyAssignment') {
+                         propName = (prop as any).getName();
+                      }
+                      if (!testedFunctions.some(t => t.includes(propName))) {
+                        const id = `${sourceFile.getBaseName()}:${propName}`;
+                        addNode(id, 'exported_member', sourceFile.getBaseName(), true, prop.getStartLineNumber(), prop.getEndLineNumber());
+                        processNode(prop, id, 1);
+                        itemCount++;
+                      }
+                   }
+                } else {
+                   const name = left.replace('module.exports.', '').replace('exports.', '');
+                   if (name && name !== 'module.exports') {
+                      if (!testedFunctions.some(t => t.includes(name))) {
+                        const id = `${sourceFile.getBaseName()}:${name}`;
+                        addNode(id, 'exported_member', sourceFile.getBaseName(), true, stmt.getStartLineNumber(), stmt.getEndLineNumber());
+                        processNode(stmt, id, 1);
+                        itemCount++;
+                      }
+                   }
+                }
+             }
+          }
+       }
+    }
+    
+    if (itemCount === 0) {
+      return JSON.stringify({ error: "No untested functions or methods found." });
+    }
+
+    const result: any = {
+      file: sourceFile.getBaseName(),
+      nodes: Array.from(nodes.values()),
+      edges
+    };
+    
+    if (itemCount >= maxItems) {
+      result.truncated = true;
+      result.note = `There are more untested functions in this file. Only the first ${maxItems} are shown to save context. Test these first.`;
+    }
+
+    return JSON.stringify(result, null, 2);
+  } catch (error: any) {
+    return JSON.stringify({ error: `Failed to generate Knowledge Graph: ${error.message}` });
   }
 }
