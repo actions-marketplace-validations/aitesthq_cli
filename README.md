@@ -96,6 +96,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Install Dependencies
+        run: npm install
+      
       - name: Run AI Test CLI (Auto-Fix)
         uses: aitesthq/cli@main
         with:
