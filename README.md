@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/logo.png" alt="AI Test CLI Logo" width="150"style="border-radius:50%;"/>
+  <img src="./assets/logo.png" alt="AI Test CLI Logo" width="150" style="border-radius:50%;"/>
 </p>
 
 <h1 align="center">AI Test CLI 🧪🤖</h1>
@@ -97,7 +97,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Run AI Test CLI (Auto-Fix)
-        uses: aitesthq/ai-test-cli@main
+        uses: aitesthq/cli@main
         with:
           provider: 'deepseek'
           api_key: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -115,7 +115,7 @@ You can lock down the action with enterprise-grade settings to completely overri
 
 ```yaml
       - name: Run AI Test CLI (Auto-Fix)
-        uses: aitesthq/ai-test-cli@main
+        uses: aitesthq/cli@main
         with:
           provider: 'custom'
           api_key: 'not-needed-for-proxy'
