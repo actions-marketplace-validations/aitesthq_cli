@@ -397,7 +397,7 @@ If using \`append_test\`, format your response EXACTLY like this:
       
       lastError = result.output;
       const maxText = maxAttempts === -1 ? '∞' : maxAttempts;
-      console.log(chalk.yellow(`\n⚠ Test failed for ${fileLabel}. Requesting fix from AI (Attempt ${attempts} of ${maxText})...`));
+      console.log(chalk.yellow(`\n⚠ Test failed for ${fileLabel}. Requesting new repair strategy from AI (Local File Retry ${attempts} of ${maxText})...`));
       
       const snippet = lastError.split('\n').slice(0, 15).join('\n');
       console.log(chalk.dim(`  Error Snippet:\n    ${snippet.replace(/\n/g, '\n    ')}`));

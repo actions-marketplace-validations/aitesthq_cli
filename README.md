@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/logo.png" alt="AI Test CLI Logo" width="150"style="border-radius:50%;"/>
+</p>
+
 <h1 align="center">AI Test CLI 🧪🤖</h1>
 
 <p align="center">
@@ -6,7 +10,7 @@
 
 <p align="center">
   <a href="https://badge.fury.io/js/ai-test-cli"><img src="https://badge.fury.io/js/ai-test-cli.svg" alt="npm version" /></a>
-  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT" /></a>
 </p>
 
 ---
@@ -15,11 +19,10 @@
 
 Most AI testing tools just write boilerplate code and give up when tests fail. **AI Test CLI is different.** It operates like a real Senior QA engineer using a fully autonomous "Agentic Loop":
 
-1. **Intelligent Generation**: It reads your file, understands its imports, scans your workspace structure, and writes comprehensive tests using your existing framework (Jest, Vitest, Mocha, etc.).
-2. **Massive File Support**: Got an 11,000+ line controller? No problem. The **Agentic Chunking Generator** explores the file function-by-function, incrementally building out coverage without blowing up LLM token limits.
-3. **Smart Context for Local Models**: Running Ollama on a MacBook? The CLI automatically detects Local LLMs and engages "Extreme Chunking Mode" to guarantee your computer never crashes from context-window overflow.
-4. **Autonomous Auto-Fixing**: It actually *runs* the tests it writes. If they fail, it reads the error stack trace, uses search tools to inspect the broken dependencies, and dynamically applies patches until the test passes.
-5. **Bring Your Own Key (BYOK)**: Supports DeepSeek, OpenAI, Anthropic, Gemini, and Local Models (Ollama/LMStudio) via the Vercel AI SDK. 
+1. **Intelligent Generation**: It reads your source file, maps your workspace architecture via AST parsing, and writes comprehensive tests using your existing framework (Jest, Vitest, Mocha, etc.).
+2. **Massive File Support**: The **Agentic Chunking Generator** explores massive files function-by-function, incrementally building out coverage without blowing up LLM token limits.
+3. **Autonomous Auto-Fixing**: It actually *runs* the tests it writes. If they fail, it reads the error stack trace, maps it back to your source code, and dynamically applies patches until the pipeline turns green.
+4. **Bring Your Own Key (BYOK)**: Supports DeepSeek, OpenAI, Anthropic, Gemini, and Local Models (Ollama/LMStudio) via the Vercel AI SDK. 
 
 ---
 
@@ -44,90 +47,115 @@ Set your API key in your `.env` file, or set it in your environment:
 export DEEPSEEK_API_KEY="sk-..."
 export OPENAI_API_KEY="sk-..."
 export ANTHROPIC_API_KEY="sk-..."
-export GEMINI_API_KEY="AIza..."
-export CUSTOM_API_KEY="sk-..."
 ```
 
 ---
 
 ## 🛠️ Usage
 
-### Generate Tests
-
-Generate a test suite for a single file:
-```bash
-aitest generate --file path/to/your/file.ts
-```
-
-Generate tests for your entire project (this will skip files that already have tests):
-```bash
-aitest generate --all
-```
-
-**Iterative Coverage**: If a test file already exists, running `aitest generate` again will automatically evaluate the existing file for missing coverage and append tests for untested functions!
-
-### Auto-Fix Broken Tests
+### Auto-Fix Broken Tests (Self-Healing)
 
 Got a test suite that's failing because of broken mocks or outdated logic? Unleash the agentic fixer:
 ```bash
 aitest fix
 ```
-The AI will run your entire test suite, isolate the failures, analyze the error stack traces, and incrementally patch your test files until they turn green.
+The AI will run your entire test suite, isolate the failures, analyze the error stack traces, and patch the broken test file until it turns green. *(Note: The CLI currently handles fixing one failing file per run).*
+
+### Generate Tests
+
+Generate a test suite for a single file:
+```bash
+aitest generate --file src/controllers/userController.ts
+```
+
+Generate tests for your entire project (this will gracefully skip files that already have tests or lack testable logic):
+```bash
+aitest generate --all
+```
+
+**Iterative Coverage**: Run `aitest generate --coverage` to automatically run a coverage report, identify files missing branch coverage, and have the AI rewrite them for 100% coverage!
 
 ### Generate Global Mocks
-Mocking external dependencies (like Stripe or AWS) by hand is incredibly tedious. You can tell the AI to automatically read your `package.json` and generate global `__mocks__` for all your third-party dependencies:
+Mocking external dependencies (like Stripe or AWS) by hand is incredibly tedious. Tell the AI to read your `package.json` and generate global `__mocks__`:
 ```bash
 aitest mock --dependencies
 ```
-You can also generate a mock for a specific internal file to isolate your unit tests:
-```bash
-aitest mock --file src/utils/database.js
-```
 
-### Explain Failures
-Don't want the AI to fix it for you? Just ask it to explain why a test is failing:
-```bash
-aitest explain
-```
+### Continuous Integration (GitHub Action)
+You can automate your team's debugging by dropping `ai-test-cli` directly into your GitHub Actions! If a developer breaks a test in a Pull Request, the Action will autonomously fix it.
 
-### Continuous Integration (CI) Mode
-You can automate your entire team's debugging by dropping `aitest` directly into your GitHub Actions! If a developer breaks a test, the CLI will autonomously fix it and open a PR:
+Create `.github/workflows/ai-test-fix.yml`:
 
 ```yaml
-steps:
-  - name: Run AI Test Auto-Fix
-    run: aitest fix --ci
-    
-  - name: Create Pull Request
-    uses: peter-evans/create-pull-request@v6
-    with:
-      title: "🤖 AI Test CLI: Fixed broken tests"
-      commit-message: "chore: Auto-fixed broken tests via AI"
+name: AI Test Auto-Fix
+on: [pull_request]
+
+jobs:
+  auto-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run AI Test CLI (Auto-Fix)
+        uses: aitesthq/ai-test-cli@main
+        with:
+          provider: 'deepseek'
+          api_key: ${{ secrets.DEEPSEEK_API_KEY }}
+          command: 'fix'
+          
+      - name: Create Pull Request with Fixes
+        uses: peter-evans/create-pull-request@v6
+        with:
+          title: "🤖 AI Test CLI: Auto-fixed broken tests"
+          commit-message: "chore: Auto-fixed broken tests via AI"
 ```
 
+#### Advanced Optional Inputs
+You can lock down the action with enterprise-grade settings to completely override the developers' local `.aitestrc.json` configuration during the CI run:
+
+```yaml
+      - name: Run AI Test CLI (Auto-Fix)
+        uses: aitesthq/ai-test-cli@main
+        with:
+          provider: 'custom'
+          api_key: 'not-needed-for-proxy'
+          command: 'fix'
+          model: 'gpt-4o'                           # Force a specific model in CI
+          max_loops: '10'                           # Allow up to 10 files to be fixed automatically
+          custom_headers: '{"X-Token": "${{ secrets.PROXY }}"}' # Safely inject secret headers
+```
+
+#### GitLab CI (`.gitlab-ci.yml`)
+```yaml
+ai-test-fix:
+  stage: test
+  image: node:20
+  script:
+    - npm install
+    - npm install -g ai-test-cli
+    - aitest fix --ci
+  variables:
+    DEEPSEEK_API_KEY: $DEEPSEEK_API_KEY
+  only:
+    - merge_requests
+```
+
+#### Bitbucket Pipelines (`bitbucket-pipelines.yml`)
+```yaml
+pipelines:
+  pull-requests:
+    '**':
+      - step:
+          name: AI Test Auto-Fix
+          image: node:20
+          script:
+            - npm install
+            - npm install -g ai-test-cli
+            - aitest fix --ci
+```
+
+
 ---
-
-## 🧠 Supported Providers
-
-The CLI supports the following providers out of the box via your `.aitestrc.json`:
-- `deepseek` (Highly Recommended: 128k context, extremely cheap)
-- `openai` 
-- `anthropic`
-- `gemini`
-- `ollama` (Local models, automatically triggers Smart Context chunking)
-
----
-
-## 🛡️ Safety Mechanisms
-
-AI Test CLI is built with strict API billing safeguards:
-- **Stagnation Protection**: If the AI gets confused and fails to write a test chunk after 10 attempts, it safely aborts.
-- **Duplicate Action Protection**: If the AI falls into a hallucinatory repetition loop, the CLI detects it and breaks the loop instantly to save your API credits.
-- **Smart Context**: Drastically reduces token consumption for massive files by chunking out irrelevant lines during the repair loop.
-
----
-
 
 ## 📄 License
-
 MIT License. See [LICENSE](LICENSE) for more information.

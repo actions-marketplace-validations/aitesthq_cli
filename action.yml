@@ -1,0 +1,83 @@
+name: 'AI Test CLI'
+description: 'Autonomous AI software testing engineer for your CI/CD pipelines'
+author: 'aitesthq'
+branding:
+  icon: 'check-circle'
+  color: 'green'
+
+inputs:
+  provider:
+    description: 'AI Provider (deepseek, openai, anthropic, gemini, custom)'
+    required: false
+    default: 'deepseek'
+  api_key:
+    description: 'API Key for the selected provider'
+    required: true
+  command:
+    description: 'Command to run (fix, generate, run)'
+    required: false
+  max_loops:
+    description: 'Max number of self-healing loops (only applies to the fix command)'
+    required: false
+    default: '5'
+  model:
+    description: 'AI Model to use (overrides local config if provided)'
+    required: false
+  custom_headers:
+    description: 'Custom headers as JSON string (e.g. {"X-Enterprise-Token": "secret"})'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install AI Test CLI
+      shell: bash
+      run: npm install -g ai-test-cli
+
+    - name: Run AI Test CLI
+      shell: bash
+      env:
+        DEEPSEEK_API_KEY: ${{ inputs.api_key }}
+        OPENAI_API_KEY: ${{ inputs.api_key }}
+        ANTHROPIC_API_KEY: ${{ inputs.api_key }}
+        GEMINI_API_KEY: ${{ inputs.api_key }}
+        CUSTOM_API_KEY: ${{ inputs.api_key }}
+      run: |
+        node -e "
+          const fs = require('fs');
+          let config = {};
+          if (fs.existsSync('.aitestrc.json')) {
+            config = JSON.parse(fs.readFileSync('.aitestrc.json', 'utf8'));
+          }
+          // The action input provider overrides the local config provider for the CI run
+          config.provider = '${{ inputs.provider }}';
+          
+          // If the boss specifies a model in the workflow, override it too!
+          const modelInput = '${{ inputs.model }}';
+          if (modelInput) {
+            config.model = modelInput;
+          }
+
+          // If the boss passes secret custom headers via GitHub Secrets, merge them!
+          const customHeadersInput = '${{ inputs.custom_headers }}';
+          if (customHeadersInput) {
+            try {
+              const extraHeaders = JSON.parse(customHeadersInput);
+              config.customHeaders = { ...(config.customHeaders || {}), ...extraHeaders };
+            } catch (e) {
+              console.error('Failed to parse custom_headers input as JSON.');
+            }
+          }
+          
+          fs.writeFileSync('.aitestrc.json', JSON.stringify(config, null, 2));
+        "
+        if [ "${{ inputs.command }}" == "fix" ]; then
+          aitest fix --ci --max-loops ${{ inputs.max_loops }}
+        else
+          aitest ${{ inputs.command }} --ci
+        fi
