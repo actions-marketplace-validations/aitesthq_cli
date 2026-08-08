@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.7] - 2026-08-08
+
+### 🚀 Features
+- **Massive File Support (Agentic Chunking)**: Never hit a token limit again! The AI can now intelligently process massive, complex files by breaking them down and writing tests function-by-function. This guarantees deeper coverage without losing context or crashing.
+- **Interactive Previews (Human-in-the-Loop)**: Added a new `--preview` mode. Instead of blindly overwriting your codebase, the CLI can now stream exact previews of its generated tests. This powers the new VS Code extension's gorgeous inline diffs, letting you safely accept or reject the AI's work line-by-line!
+
+
+
 ## [0.2.3] - 2026-07-30
 
 ### 🚀 Features

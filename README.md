@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="./assets/logo.png" alt="AI Test CLI Logo" width="150" style="border-radius:50%;"/>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/aitesthq/cli/main/assets/logo.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/aitesthq/cli/main/assets/logo-light.svg">
+    <img alt="AI Test CLI Logo" src="https://raw.githubusercontent.com/aitesthq/cli/main/assets/logo.svg" width="150" style="border-radius:50%;">
+  </picture>
 </p>
 
 <h1 align="center">AI Test CLI 🧪🤖</h1>
