@@ -1,4 +1,6 @@
 import { Command } from 'commander';
+import * as os from 'os';
+import * as crypto from 'crypto';
 import { loadConfig, AITestConfig } from '../core/config.js';
 import { logger } from '../core/logger.js';
 import { detectProjectInfo, ProjectInfo } from '../core/detector.js';
@@ -7,7 +9,7 @@ import { askAI } from '../core/ai.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { resolve, relative, dirname, basename, extname } from 'path';
+import { resolve, relative, dirname, basename, extname, join } from 'path';
 import fg from 'fast-glob';
 import { scanDependencies, generateWorkspaceMap, scanExternalDependencies } from '../core/scanner.js';
 import chalk from 'chalk';
@@ -26,7 +28,8 @@ export async function generateTestForFile(
   projectInfo: ProjectInfo,
   forceUpdate = false,
   evaluateExisting = false,
-  workspaceMap = ''
+  workspaceMap = '',
+  previewMode = false
 ): Promise<'generated' | 'skipped' | 'failed'> {
   const relPath = relative(process.cwd(), filePath);
   const dir = dirname(filePath);
@@ -120,7 +123,19 @@ export async function generateTestForFile(
       return 'skipped';
     }
 
-    writeFileSync(testFilePath, testCode, 'utf-8');
+    if (previewMode) {
+      const isNewFile = !existsSync(testFilePath);
+      const oldCode = isNewFile ? '' : readFileSync(testFilePath, 'utf-8');
+      
+      const hash = crypto.createHash('md5').update(testFilePath).digest('hex').substring(0, 8);
+      const backupPath = join(os.tmpdir(), `aitest-${Date.now()}-${hash}.bak`);
+      writeFileSync(backupPath, oldCode, 'utf-8');
+      
+      writeFileSync(testFilePath, testCode, 'utf-8');
+      logger.info(`[PREVIEW_GENERATED] ${backupPath}|${testFilePath}${isNewFile ? '|new' : ''}`);
+    } else {
+      writeFileSync(testFilePath, testCode, 'utf-8');
+    }
     spinner.stop();
     return 'generated';
   } catch (error: any) {
@@ -135,6 +150,7 @@ export const generateCommand = new Command('generate')
   .option('-f, --file <path>', 'Generate tests for a specific file')
   .option('-u, --force-update', 'Force rewrite existing test files (ignores code coverage logic)')
   .option('-e, --evaluate-existing', 'Evaluate existing tests and ONLY rewrite if missing code coverage')
+  .option('-p, --preview', 'Preview mode: generates .preview file instead of overwriting')
   .action(async (options) => {
     const config = await loadConfig();
     if (!config) {
@@ -177,7 +193,7 @@ export const generateCommand = new Command('generate')
           for (const file of filesToFix) {
             const fullPath = resolve(process.cwd(), file);
             if (existsSync(fullPath)) {
-              await generateTestForFile(fullPath, config, projectInfo, true, false, workspaceMap);
+              await generateTestForFile(fullPath, config, projectInfo, true, false, workspaceMap, options.preview);
             }
           }
           logger.success(`\nFinished coverage-driven generation for ${filesToFix.length} files.`);
@@ -225,7 +241,7 @@ export const generateCommand = new Command('generate')
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const fullPath = resolve(process.cwd(), file);
-        const result = await planner.generateFile(fullPath, { forceUpdate: options.forceUpdate, evaluateExisting: options.evaluateExisting, workspaceMap });
+        const result = await planner.generateFile(fullPath, { forceUpdate: options.forceUpdate, evaluateExisting: options.evaluateExisting, workspaceMap, preview: options.preview });
         if (result === 'generated') successCount++; else if (result === 'skipped') skippedCount++;
       }
       
@@ -256,7 +272,7 @@ export const generateCommand = new Command('generate')
       
       logger.info(`Starting Agentic test generation for ${options.file}...`);
       const startTime = Date.now();
-      const result = await planner.generateFile(filePath, { forceUpdate: options.forceUpdate, evaluateExisting: options.evaluateExisting, workspaceMap });
+      const result = await planner.generateFile(filePath, { forceUpdate: options.forceUpdate, evaluateExisting: options.evaluateExisting, workspaceMap, preview: options.preview });
       if (result === 'generated') {
          const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
          logger.success(`\nFinished! Successfully generated test for ${options.file}.`);

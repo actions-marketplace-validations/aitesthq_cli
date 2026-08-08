@@ -4,8 +4,9 @@ import { askAI } from '../core/ai.js';
 import { runSingleTest } from '../core/runner.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, readFileSync, existsSync, readdirSync, mkdirSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, readdirSync, mkdirSync, unlinkSync } from 'fs';
 import { resolve, dirname, join, basename } from 'path';
+import { tmpdir } from 'os';
 import { generateTestForFile } from '../commands/generate.js';
 import { scanDependencies, generateWorkspaceMap, generateASTMap, generateKnowledgeGraph } from '../core/scanner.js';
 import { Project, ts } from 'ts-morph';
@@ -48,9 +49,9 @@ export class AgenticPlanner {
   /** Generate tests for a file using the LLM planning loop. */
   async generateFile(
     sourceFilePath: string,
-    options: { forceUpdate?: boolean; evaluateExisting?: boolean; workspaceMap?: string } = {}
+    options: { forceUpdate?: boolean; evaluateExisting?: boolean; workspaceMap?: string; preview?: boolean } = {}
   ): Promise<'generated' | 'skipped' | 'failed'> {
-    const { forceUpdate = false, evaluateExisting = false } = options;
+    const { forceUpdate = false, evaluateExisting = false, preview = false } = options;
 
     let isMassive = false;
     let fileLength = 0;
@@ -64,7 +65,7 @@ export class AgenticPlanner {
 
     if (isMassive) {
        console.log(chalk.yellow(`\n⚠ File ${sourceFilePath.split('/').pop()} is massive (${fileLength} chars). Engaging Agentic Chunking Generator...`));
-       initialResult = await this._runAgenticGeneratorLoop(sourceFilePath, this._deriveTestPath(sourceFilePath));
+       initialResult = await this._runAgenticGeneratorLoop(sourceFilePath, this._deriveTestPath(sourceFilePath), preview);
     } else {
        // 1️⃣ Create an initial test file using the existing generator.
        initialResult = await generateTestForFile(
@@ -73,7 +74,8 @@ export class AgenticPlanner {
          this.projectInfo,
          forceUpdate,
          evaluateExisting,
-         this.workspaceMap
+         this.workspaceMap,
+         preview
        );
     }
 
@@ -81,15 +83,14 @@ export class AgenticPlanner {
     if (initialResult === 'failed') return 'failed';
 
     // 2️⃣ Enter the repair loop for generation
-    return this._runAgenticLoop(this._deriveTestPath(sourceFilePath), sourceFilePath);
+    return this._runAgenticLoop(this._deriveTestPath(sourceFilePath), sourceFilePath, options.preview, true);
   }
 
-  /** Run the agentic repair loop on an existing test file. */
-  async fixTestFile(testFilePath: string, sourceFilePath?: string): Promise<'generated' | 'skipped' | 'failed'> {
-    return this._runAgenticLoop(testFilePath, sourceFilePath);
+  async fixTestFile(testFilePath: string, sourceFilePath?: string, options: { preview?: boolean } = {}): Promise<'generated' | 'skipped' | 'failed'> {
+    return this._runAgenticLoop(testFilePath, sourceFilePath, options.preview);
   }
 
-  private async _runAgenticGeneratorLoop(sourceFilePath: string, testFilePath: string): Promise<'generated' | 'skipped' | 'failed'> {
+  private async _runAgenticGeneratorLoop(sourceFilePath: string, testFilePath: string, previewMode: boolean = false): Promise<'generated' | 'skipped' | 'failed'> {
     let attempts = 0;
     const maxAttempts = this.config.maxSteps !== undefined ? this.config.maxSteps : 50; // Configurable limit, fallback to 50 to protect API billing
     let stagnationCounter = 0;
@@ -104,11 +105,23 @@ export class AgenticPlanner {
       return 'failed';
     }
     
+    const isNewFile = !existsSync(testFilePath);
+    let backupPath = '';
+    
     // Seed test code with an empty string or existing file if it exists
     if (existsSync(testFilePath)) {
        testCode = readFileSync(testFilePath, 'utf-8');
     } else {
        writeFileSync(testFilePath, testCode, 'utf-8');
+    }
+
+    if (previewMode) {
+      const crypto = require('crypto');
+      const os = require('os');
+      const hash = crypto.createHash('md5').update(testFilePath).digest('hex').substring(0, 8);
+      backupPath = join(os.tmpdir(), `aitest-${Date.now()}-${hash}.bak`);
+      writeFileSync(backupPath, isNewFile ? '' : testCode, 'utf-8');
+      console.log(`[PREVIEW_GENERATED] ${backupPath}|${testFilePath}${isNewFile ? '|new' : ''}`);
     }
 
     console.log(chalk.blue(`ℹ Starting Agentic Chunking Generator for ${sourceFilePath.split('/').pop()} (${fileLines.length} lines)...`));
@@ -243,7 +256,11 @@ export class AgenticPlanner {
            if (checkSyntax(testCode + closure)) {
              testCode += closure;
              writeFileSync(testFilePath, testCode, 'utf-8');
-             console.log(chalk.green(`  ✔ Auto-Bracket Fixer successfully balanced the file braces.`));
+             if (previewMode) {
+               console.log(chalk.green(`  ✔ Auto-Bracket Fixer successfully balanced the file braces in preview!`));
+             } else {
+               console.log(chalk.green(`  ✔ Auto-Bracket Fixer successfully balanced the file braces.`));
+             }
              fixed = true;
              break;
            }
@@ -374,11 +391,19 @@ If using \`append_test\`, format your response EXACTLY like this:
   }
 
   /** Core agentic reasoning loop for generating and fixing tests. */
-  private async _runAgenticLoop(testFilePath: string, sourceFilePath?: string): Promise<'generated' | 'skipped' | 'failed'> {
+  private async _runAgenticLoop(testFilePath: string, sourceFilePath?: string, previewMode: boolean = false, isNewGeneration: boolean = false): Promise<'generated' | 'skipped' | 'failed'> {
     let attempts = 0;
     const maxAttempts = this.config.maxRetries !== undefined ? this.config.maxRetries : 3;
     let lastError = '';
     let testCode = readFileSync(testFilePath, 'utf-8');
+    
+    // Store backup in the OS temp directory to keep the workspace clean
+    const backupPath = join(tmpdir(), `aitest-${Buffer.from(testFilePath).toString('base64').replace(/[^a-zA-Z0-9]/g, '')}.bak`);
+    
+    if (previewMode) {
+       writeFileSync(backupPath, testCode, 'utf-8');
+    }
+
     const history: string[] = [];
     const recentPatches: string[] = []; // To detect loops
     const fileLabel = sourceFilePath ? sourceFilePath.split('/').pop() : testFilePath.split('/').pop();
@@ -389,8 +414,16 @@ If using \`append_test\`, format your response EXACTLY like this:
       if (result.passed) {
         if (attempts > 1) {
           console.log(chalk.green(`\n✔ AI successfully fixed the test for ${fileLabel} after ${attempts - 1} attempt(s)!`));
+          if (previewMode) {
+             console.log(`[PREVIEW_GENERATED] ${backupPath}|${testFilePath}`);
+          }
         } else {
           console.log(chalk.green(`\n✔ Test ${fileLabel} passed successfully in isolation. No AI fixes were needed!`));
+          if (previewMode) {
+             if (!isNewGeneration && existsSync(backupPath)) {
+                 unlinkSync(backupPath);
+             }
+          }
         }
         return 'generated';
       }
@@ -558,6 +591,12 @@ If using \`append_test\`, format your response EXACTLY like this:
     }
     
     console.log(chalk.red(`\n✖ Exhausted ${maxAttempts} AI attempts without passing.`));
+    if (previewMode && existsSync(backupPath)) {
+       const oldCode = readFileSync(backupPath, 'utf-8');
+       writeFileSync(testFilePath, oldCode, 'utf-8');
+       unlinkSync(backupPath);
+       console.log(chalk.yellow(`⚠ Restored original test file because repair failed.`));
+    }
     return 'failed'; // exhausted attempts
   }
 

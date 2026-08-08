@@ -16,6 +16,7 @@ export const fixCommand = new Command('fix')
   .description('Attempts automatic repair of failing tests using Agentic AI')
   .option('--ci', 'Run in CI mode (disables interactive prompts and fails loudly on errors)')
   .option('--max-loops <number>', 'Maximum number of self-healing loops to run', '5')
+  .option('-p, --preview', 'Preview mode: generate .bak files instead of permanently replacing code')
   .action(async (options) => {
     const config = await loadConfig();
     if (!config) {
@@ -119,7 +120,7 @@ ${stderrStr.slice(-3000)}
            const planner = new AgenticPlanner(config, projectInfo, workspaceMap);
            
            logger.info(`Delegating repair of ${failingFile} to AgenticPlanner...`);
-           const plannerResult = await planner.fixTestFile(fullPath, sourceAbsPath);
+           const plannerResult = await planner.fixTestFile(fullPath, sourceAbsPath, { preview: options.preview });
            
            if (plannerResult === 'generated') {
               const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
