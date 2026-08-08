@@ -11,6 +11,7 @@ import { generateTestForFile } from '../commands/generate.js';
 import { scanDependencies, generateWorkspaceMap, generateASTMap, generateKnowledgeGraph } from '../core/scanner.js';
 import { Project, ts } from 'ts-morph';
 import chalk from 'chalk';
+import crypto from 'crypto';
 
 const execAsync = promisify(exec);
 
@@ -116,10 +117,8 @@ export class AgenticPlanner {
     }
 
     if (previewMode) {
-      const crypto = require('crypto');
-      const os = require('os');
       const hash = crypto.createHash('md5').update(testFilePath).digest('hex').substring(0, 8);
-      backupPath = join(os.tmpdir(), `aitest-${Date.now()}-${hash}.bak`);
+      backupPath = join(tmpdir(), `aitest-${Date.now()}-${hash}.bak`);
       writeFileSync(backupPath, isNewFile ? '' : testCode, 'utf-8');
       console.log(`[PREVIEW_GENERATED] ${backupPath}|${testFilePath}${isNewFile ? '|new' : ''}`);
     }
