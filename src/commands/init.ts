@@ -77,6 +77,11 @@ export const initCommand = new Command('init')
         type: (prev, values) => values.provider === 'ollama' ? null : 'password',
         name: 'apiKey',
         message: 'Enter API Key'
+      },
+      {
+        type: 'text',
+        name: 'customInstructions',
+        message: 'Enter any custom team guidelines/instructions (comma separated, optional)'
       }
     ]);
 
@@ -134,7 +139,10 @@ export const initCommand = new Command('init')
       autoFix: true,
       maxRetries: -1, // Infinite by default
       maxSteps: 50,
-      maxExplorationSteps: 5
+      maxExplorationSteps: 5,
+      customInstructions: response.customInstructions 
+        ? response.customInstructions.split(',').map((s: string) => s.trim()).filter((s: string) => s.length > 0)
+        : []
     };
 
     await saveConfig(config);

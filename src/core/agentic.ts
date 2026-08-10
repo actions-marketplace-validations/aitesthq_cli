@@ -295,6 +295,11 @@ export class AgenticPlanner {
       testContext = `\n--- CURRENT TEST FILE PROGRESS (${testFilePath}) ---\n${testCodeWithLines || '(Empty)'}`;
     }
 
+    let customRulesContext = '';
+    if (this.config.customInstructions && this.config.customInstructions.length > 0) {
+      customRulesContext = `\n--- CUSTOM TEAM GUIDELINES ---\n(You MUST obey these rules when writing tests!)\n${this.config.customInstructions.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n`;
+    }
+
     const prompt = `You are an expert QA engineer building a test suite for a massive file using an interactive chunking agent.
 --- TARGET FILE INFO ---
 File: ${sourceFilePath}
@@ -305,7 +310,7 @@ Test Framework: ${testFramework}
 (This graph maps the internal functions and external dependencies of the UNTESTED chunks in this file. Use the "edges" array to see exactly what external dependencies a function CALLS, and mock those dependencies BEFORE writing the test to avoid failures!)
 ${astMap}
 ${testedFunctionsContext}
-${testContext}
+${customRulesContext}${testContext}
 ${historyContext}
 Your goal is to explore the target file chunk-by-chunk and incrementally build the test suite by appending test blocks.
 Based on the current progress, suggest ONE JSON plan describing your next steps. You can combine multiple actions in one plan.
@@ -648,7 +653,12 @@ If using \`append_test\`, format your response EXACTLY like this:
       testContext = `\n--- TEST FILE (${testFilePath}) ---\n${testCodeWithLines}`;
     }
 
-    const prompt = `You are an expert QA engineer. The following test has failed.${sourceContext}${astContext}${workspaceContext}${explorationContextString}${testContext}
+    let customRulesContext = '';
+    if (this.config.customInstructions && this.config.customInstructions.length > 0) {
+      customRulesContext = `\n--- CUSTOM TEAM GUIDELINES ---\n(You MUST obey these rules when patching tests!)\n${this.config.customInstructions.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n`;
+    }
+
+    const prompt = `You are an expert QA engineer. The following test has failed.${sourceContext}${astContext}${workspaceContext}${explorationContextString}${customRulesContext}${testContext}
 --- ERROR OUTPUT ---
 ${errorOutput}${historyContext}
 Based on this information, suggest ONE JSON plan describing the next actionable step. The JSON must follow this schema:

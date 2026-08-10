@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://badge.fury.io/js/ai-test-cli"><img src="https://badge.fury.io/js/ai-test-cli.svg" alt="npm version" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT" /></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=aitesthq.ai-test-studio"><img src="https://img.shields.io/badge/VS%20Code-Extension-007ACC?logo=visual-studio-code" alt="VS Code Extension" /></a>
 </p>
 
 ---
@@ -157,6 +158,12 @@ pipelines:
             - aitest fix --ci
 ```
 
+---
+
+### 🎨 Now available for VS Code!
+Prefer a beautiful graphical interface over the terminal? We just launched **AI Test Studio** for VS Code! It bundles the entire AI Test CLI engine into a stunning native sidebar with inline diff previews and 1-click test generation.
+
+[![Download from VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-007ACC?style=for-the-badge&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=aitesthq.ai-test-studio)
 
 ---
 

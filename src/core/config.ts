@@ -14,6 +14,7 @@ export interface AITestConfig {
   maxRetries?: number;
   maxSteps?: number;
   maxExplorationSteps?: number;
+  customInstructions?: string[];
 }
 
 const moduleName = 'aitest';
