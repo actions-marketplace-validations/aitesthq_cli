@@ -9,6 +9,7 @@ import { resolve, dirname, join, basename } from 'path';
 import { tmpdir } from 'os';
 import { generateTestForFile } from '../commands/generate.js';
 import { scanDependencies, generateWorkspaceMap, generateASTMap, generateKnowledgeGraph } from '../core/scanner.js';
+import { resolveTestFilePath } from '../core/pathResolver.js';
 import { Project, ts } from 'ts-morph';
 import chalk from 'chalk';
 import crypto from 'crypto';
@@ -62,11 +63,12 @@ export class AgenticPlanner {
       isMassive = fileLength > 20000;
     } catch(e) {}
 
+    const testFilePath = await this._deriveTestPath(sourceFilePath);
     let initialResult: 'generated' | 'skipped' | 'failed' = 'failed';
 
     if (isMassive) {
        console.log(chalk.yellow(`\n⚠ File ${sourceFilePath.split('/').pop()} is massive (${fileLength} chars). Engaging Agentic Chunking Generator...`));
-       initialResult = await this._runAgenticGeneratorLoop(sourceFilePath, this._deriveTestPath(sourceFilePath), preview);
+       initialResult = await this._runAgenticGeneratorLoop(sourceFilePath, testFilePath, preview);
     } else {
        // 1️⃣ Create an initial test file using the existing generator.
        initialResult = await generateTestForFile(
@@ -84,7 +86,7 @@ export class AgenticPlanner {
     if (initialResult === 'failed') return 'failed';
 
     // 2️⃣ Enter the repair loop for generation
-    return this._runAgenticLoop(this._deriveTestPath(sourceFilePath), sourceFilePath, options.preview, true);
+    return this._runAgenticLoop(testFilePath, sourceFilePath, options.preview, true);
   }
 
   async fixTestFile(testFilePath: string, sourceFilePath?: string, options: { preview?: boolean } = {}): Promise<'generated' | 'skipped' | 'failed'> {
@@ -116,6 +118,28 @@ export class AgenticPlanner {
        writeFileSync(testFilePath, testCode, 'utf-8');
     }
 
+    let styleExampleContext = '';
+    if (!testCode.trim()) {
+      try {
+        const fg = (await import('fast-glob')).default;
+        const existingTests = await fg(['**/*.test.{js,cjs,mjs,ts}', '**/*.spec.{js,cjs,mjs,ts}'], {
+          ignore: ['**/node_modules/**', '**/dist/**', '**/build/**'],
+          cwd: process.cwd(),
+          absolute: true
+        });
+        if (existingTests.length > 0) {
+          const examplePath = existingTests[0];
+          if (examplePath !== testFilePath) {
+            const exampleCode = readFileSync(examplePath, 'utf-8');
+            const truncatedCode = exampleCode.split('\\n').slice(0, 100).join('\\n');
+            styleExampleContext = `\n--- PROJECT TESTING STYLE EXAMPLE ---\n${truncatedCode}\nCRITICAL: You MUST mimic the exact testing framework, import styles, and mocking strategies shown in this example!\n`;
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
     if (previewMode) {
       const hash = crypto.createHash('md5').update(testFilePath).digest('hex').substring(0, 8);
       backupPath = join(tmpdir(), `aitest-${Date.now()}-${hash}.bak`);
@@ -133,7 +157,7 @@ export class AgenticPlanner {
       
       const astMap = generateKnowledgeGraph(sourceFilePath, testedFunctions);
       
-      const plan = await this._requestGenPlan(testCode, testFilePath, sourceFilePath, fileLines.length, history, astMap, testedFunctions);
+      const plan = await this._requestGenPlan(testCode, testFilePath, sourceFilePath, fileLines.length, history, astMap, testedFunctions, styleExampleContext);
       if (!plan) {
         console.log(chalk.red(`✖ AI failed to generate a valid generation plan. Retrying...`));
         history.push(`Attempt ${attempts}: SYSTEM ERROR - Last response was invalid JSON. Ensure you output raw JSON only, and properly escape quotes/newlines in any arrays or strings.`);
@@ -273,7 +297,7 @@ export class AgenticPlanner {
     return testCode.trim().length > 0 ? 'generated' : 'failed';
   }
 
-  private async _requestGenPlan(testCode: string, testFilePath: string, sourceFilePath: string, totalLines: number, history: string[], astMap: string, testedFunctions: string[]): Promise<any | null> {
+  private async _requestGenPlan(testCode: string, testFilePath: string, sourceFilePath: string, totalLines: number, history: string[], astMap: string, testedFunctions: string[], styleExampleContext: string = ''): Promise<any | null> {
     const historyToKeep = history.slice(-3);
     const historyContext = historyToKeep.length > 0 ? `\n--- RECENT ACTIONS & RESULTS (Last 3) ---\n${historyToKeep.join('\n\n')}\n` : '';
     const testFramework = this.projectInfo.testRunner === 'unknown' ? 'Jest' : this.projectInfo.testRunner;
@@ -310,6 +334,7 @@ Test Framework: ${testFramework}
 (This graph maps the internal functions and external dependencies of the UNTESTED chunks in this file. Use the "edges" array to see exactly what external dependencies a function CALLS, and mock those dependencies BEFORE writing the test to avoid failures!)
 ${astMap}
 ${testedFunctionsContext}
+${styleExampleContext}
 ${customRulesContext}${testContext}
 ${historyContext}
 Your goal is to explore the target file chunk-by-chunk and incrementally build the test suite by appending test blocks.
@@ -605,15 +630,8 @@ If using \`append_test\`, format your response EXACTLY like this:
   }
 
   /** Derive the .test.* or .spec.* filename from a source file path. */
-  private _deriveTestPath(sourceFilePath: string): string {
-    const ext = sourceFilePath.substring(sourceFilePath.lastIndexOf('.'));
-    const base = sourceFilePath.substring(
-      sourceFilePath.lastIndexOf('/') + 1,
-      sourceFilePath.length - ext.length
-    );
-    const dir = dirname(sourceFilePath);
-    const suffix = (this.projectInfo.framework === 'angular' || this.projectInfo.testRunner === 'vitest') ? '.spec' : '.test';
-    return resolve(dir, `${base}${suffix}${ext}`);
+  private async _deriveTestPath(sourceFilePath: string): Promise<string> {
+    return resolveTestFilePath(sourceFilePath, this.projectInfo, this.config, this.workspaceMap);
   }
 
   /** Prompt the LLM for a JSON plan based on a failed test run. */

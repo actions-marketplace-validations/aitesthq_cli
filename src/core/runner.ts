@@ -19,6 +19,8 @@ export async function runSingleTest(testFilePath: string, projectInfo: ProjectIn
     command = `npx vitest run "${testFilePath}"`;
   } else if (projectInfo.testRunner === 'mocha') {
     command = `npx mocha "${testFilePath}" --exit`;
+  } else if (projectInfo.testRunner === 'node') {
+    command = `node --test "${testFilePath}"`;
   }
 
   try {

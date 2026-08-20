@@ -3,23 +3,30 @@ import { resolve } from 'path';
 
 export interface ProjectInfo {
   language: 'javascript' | 'typescript';
-  testRunner: 'jest' | 'vitest' | 'mocha' | 'unknown';
+  testRunner: 'jest' | 'vitest' | 'mocha' | 'node' | 'unknown';
   framework: 'react' | 'vue' | 'angular' | 'node' | 'unknown';
   packageManager: 'npm' | 'yarn' | 'pnpm' | 'bun';
 }
 
 export function detectProjectInfo(targetDir: string = process.cwd()): ProjectInfo {
-  const packageJsonPath = resolve(targetDir, 'package.json');
-  const tsconfigPath = resolve(targetDir, 'tsconfig.json');
-  
+  let currentDir = targetDir;
+  let packageJsonPath = resolve(currentDir, 'package.json');
   let packageJson: any = {};
-  if (existsSync(packageJsonPath)) {
-    try {
-      packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
-    } catch (e) {
-      // ignore
+  
+  while (currentDir !== resolve(currentDir, '..')) {
+    if (existsSync(packageJsonPath)) {
+      try {
+        packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+        break;
+      } catch (e) {
+        // ignore
+      }
     }
+    currentDir = resolve(currentDir, '..');
+    packageJsonPath = resolve(currentDir, 'package.json');
   }
+
+  const tsconfigPath = resolve(targetDir, 'tsconfig.json');
 
   const allDeps = {
     ...(packageJson.dependencies || {}),
@@ -32,6 +39,11 @@ export function detectProjectInfo(targetDir: string = process.cwd()): ProjectInf
   if (allDeps['jest']) testRunner = 'jest';
   else if (allDeps['vitest']) testRunner = 'vitest';
   else if (allDeps['mocha']) testRunner = 'mocha';
+  else {
+    const scripts = packageJson.scripts || {};
+    const hasNodeTest = Object.values(scripts).some((script: any) => typeof script === 'string' && script.includes('node --test'));
+    if (hasNodeTest) testRunner = 'node';
+  }
 
   let framework: ProjectInfo['framework'] = 'unknown';
   if (allDeps['react']) framework = 'react';
@@ -45,4 +57,11 @@ export function detectProjectInfo(targetDir: string = process.cwd()): ProjectInf
   else if (existsSync(resolve(targetDir, 'bun.lockb'))) packageManager = 'bun';
 
   return { language, testRunner, framework, packageManager };
+}
+
+export function detectTestDir(targetDir: string = process.cwd()): string | null {
+  if (existsSync(resolve(targetDir, 'test'))) return 'test';
+  if (existsSync(resolve(targetDir, 'tests'))) return 'tests';
+  if (existsSync(resolve(targetDir, '__tests__'))) return '__tests__';
+  return null;
 }

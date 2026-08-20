@@ -2,9 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.9] - 2026-08-10
+## [0.3.0] - 2026-08-20
 
 ### 🚀 Features
+- **Zero-Config Contextual Style RAG**: The CLI now secretly scans your workspace for existing tests before generating new ones. It dynamically feeds these into the LLM as context, perfectly mimicking your team's custom imports, assertions, and mocking strategies without needing any manual configuration.
+- **Agentic File Routing**: No more rigid globs! By adding plain-English routing instructions to your `.aitestrc.json` (e.g., *"save tests inside a test subfolder"*), the LLM dynamically evaluates file paths and saves generated tests exactly where your team wants them.
+- **Native Node.js Test Runner Support**: Upgraded the internal analyzer to automatically detect `node:test` from your package scripts, providing flawless, zero-config support for Node.js native testing environments alongside Jest, Vitest, and Mocha.
+
+## [0.2.9] - 2026-08-10
 - **Custom Team Guidelines Setup**: The `aitest init` wizard now directly prompts for custom team instructions/rules, making it easier to define specific test constraints (e.g., "Never use Enzyme") globally right out of the box.
 
 ## [0.2.7] - 2026-08-08

@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { resolve, relative, dirname, basename, extname, join } from 'path';
 import fg from 'fast-glob';
 import { scanDependencies, generateWorkspaceMap, scanExternalDependencies } from '../core/scanner.js';
+import { resolveTestFilePath } from '../core/pathResolver.js';
 import chalk from 'chalk';
 import { AgenticPlanner } from '../core/agentic.js';
 
@@ -32,11 +33,7 @@ export async function generateTestForFile(
   previewMode = false
 ): Promise<'generated' | 'skipped' | 'failed'> {
   const relPath = relative(process.cwd(), filePath);
-  const dir = dirname(filePath);
-  const ext = extname(filePath);
-  const name = basename(filePath, ext);
-  const suffix = (projectInfo.framework === 'angular' || projectInfo.testRunner === 'vitest') ? '.spec' : '.test';
-  const testFilePath = resolve(dir, `${name}${suffix}${ext}`);
+  const testFilePath = await resolveTestFilePath(filePath, projectInfo, config, workspaceMap);
 
   const spinner = logger.spinner(`Analyzing ${relPath}...`).start();
 
@@ -82,8 +79,29 @@ export async function generateTestForFile(
     existingTestContext = `\n\n--- EXISTING TEST SUITE (NEEDS IMPROVEMENT) ---\n${existingCode}\n`;
   }
 
+  let styleExampleContext = '';
+  if (!existingTestContext) {
+    try {
+      const existingTests = await fg(['**/*.test.{js,cjs,mjs,ts}', '**/*.spec.{js,cjs,mjs,ts}'], {
+        ignore: ['**/node_modules/**', '**/dist/**', '**/build/**'],
+        cwd: process.cwd(),
+        absolute: true
+      });
+      if (existingTests.length > 0) {
+        const examplePath = existingTests[0];
+        if (examplePath !== testFilePath) {
+          const exampleCode = readFileSync(examplePath, 'utf-8');
+          const truncatedCode = exampleCode.split('\\n').slice(0, 100).join('\\n');
+          styleExampleContext = `\n\n--- PROJECT TESTING STYLE EXAMPLE ---\n${truncatedCode}\n`;
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
   try {
-    const promptContext = `Original file name: ${relPath}\n\nCode:\n${fileContent}\n\n${additionalContext}${existingTestContext}`;
+    const promptContext = `Original file name: ${relPath}\n\nCode:\n${fileContent}\n\n${additionalContext}${styleExampleContext}${existingTestContext}`;
 
     let promptInstructions = '';
     if (existingTestContext) {
@@ -97,6 +115,9 @@ export async function generateTestForFile(
     } else {
       const testFramework = projectInfo.testRunner === 'unknown' ? 'Jest' : projectInfo.testRunner;
       promptInstructions = `You are an expert QA and software testing engineer. Generate a comprehensive unit test suite for the provided code. Output ONLY valid executable code (with markdown code blocks) and nothing else. The target test framework is ${testFramework}. If the file is purely type definitions, interfaces, simple exports, or does not contain testable logic, reply ONLY with the exact string "SKIP_FILE" and do not generate any code. You will be provided with the target code and its imported dependencies to ensure you have the full architectural context.\nCRITICAL: Assume global mocks exist in the __mocks__ directory for all third-party libraries. DO NOT write massive inline mock implementations inside the test file. Rely on the global mocks and only write the pure unit test logic.\nCRITICAL: If the file represents a framework entry point or server initialization file, do NOT try to unit test internal plumbing with mocks. You MUST write an integration test (using tools like supertest if applicable).\nCRITICAL: If testing databases or ORMs, use standard mock techniques. If using Vitest, you MUST explicitly \`import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'\` at the top of the file, and use vi.mocked() to mock imported functions.`;
+      if (styleExampleContext) {
+        promptInstructions += `\nCRITICAL: You MUST mimic the exact testing framework, import styles, assertions, and mocking strategies shown in the PROJECT TESTING STYLE EXAMPLE provided in the context.`;
+      }
     }
 
     const generatedCode = await askAI(config, promptInstructions, promptContext);

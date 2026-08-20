@@ -18,12 +18,13 @@
 
 ## 🌟 Why AI Test CLI?
 
-Most AI testing tools just write boilerplate code and give up when tests fail. **AI Test CLI is different.** It operates like a real Senior QA engineer using a fully autonomous "Agentic Loop":
+Most AI coding tools just vomit boilerplate code and give up when tests fail. **AI Test CLI is different.** It is the first fully autonomous, *Zero-Config* QA agent that reads the room before it writes code.
 
-1. **Intelligent Generation**: It reads your source file, maps your workspace architecture via AST parsing, and writes comprehensive tests using your existing framework (Jest, Vitest, Mocha, etc.).
-2. **Massive File Support**: The **Agentic Chunking Generator** explores massive files function-by-function, incrementally building out coverage without blowing up LLM token limits.
-3. **Autonomous Auto-Fixing**: It actually *runs* the tests it writes. If they fail, it reads the error stack trace, maps it back to your source code, and dynamically applies patches until the pipeline turns green.
-4. **Bring Your Own Key (BYOK)**: Supports DeepSeek, OpenAI, Anthropic, Gemini, and Local Models (Ollama/LMStudio) via the Vercel AI SDK. 
+1. **Zero-Config Contextual Style RAG**: Whether your team uses `jest`, `vitest`, `mocha`, or the native `node:test` runner, the CLI automatically searches your workspace for existing tests, silently feeds them to the LLM as context, and flawlessly mimics your exact in-house importing, mocking, and assertion styles. No configuration required.
+2. **Agentic File Routing**: Hate writing messy glob patterns in config files? Just add a plain-English instruction to `.aitestrc.json` (e.g., *"Save tests in a 'test' subfolder right next to the source file"*), and the AI will dynamically resolve and route the generated test files to the perfect directory.
+3. **Autonomous Auto-Fixing (Self-Healing Loop)**: It actually *runs* the tests it writes. If they fail, it reads the error stack trace, maps it back to your source code, and dynamically applies patches until the pipeline turns green.
+4. **Massive File Support**: The **Agentic Chunking Generator** explores massive files function-by-function, incrementally building out coverage without blowing up LLM token limits.
+5. **Bring Your Own Key (BYOK)**: Supports DeepSeek, OpenAI, Anthropic, Gemini, and Local Models (Ollama/LMStudio) via the Vercel AI SDK. 
 
 ---
 
