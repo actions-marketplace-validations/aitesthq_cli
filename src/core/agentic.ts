@@ -13,21 +13,30 @@ import { resolveTestFilePath } from '../core/pathResolver.js';
 import { Project, ts } from 'ts-morph';
 import chalk from 'chalk';
 import crypto from 'crypto';
+import { validateWithRepair, z, type infer as InferSchema } from '@scope/agent-response-schema';
 
 const execAsync = promisify(exec);
 
-type AgenticAction =
-  | { action: 'apply_patch'; file: string; code: string }
-  | { action: 'install_deps'; deps: string[] }
-  | { action: 'abort'; reason: string }
-  | { action: 'read_file'; path: string }
-  | { action: 'list_dir'; path: string }
-  | { action: 'generate_mock'; target: string; type: 'external' | 'internal' };
+export const agenticPlanSchema = z.object({
+  reasoning: z.optional(z.string()),
+  steps: z.array(z.object({
+    action: z.enum(['apply_patch', 'install_deps', 'abort', 'read_file', 'list_dir', 'search_file', 'read_lines', 'generate_mock', 'delete_file', 'replace_lines']),
+    file: z.optional(z.string()),
+    code: z.optional(z.string()),
+    deps: z.optional(z.array(z.string())),
+    reason: z.optional(z.string()),
+    path: z.optional(z.string()),
+    target: z.optional(z.string()),
+    type: z.optional(z.enum(['external', 'internal'])),
+    startLine: z.optional(z.number()),
+    endLine: z.optional(z.number()),
+    replacementCode: z.optional(z.string()),
+    query: z.optional(z.string()),
+    dev: z.optional(z.boolean())
+  }))
+});
 
-interface AgenticPlan {
-  reasoning: string;
-  steps: AgenticAction[];
-}
+type AgenticPlan = InferSchema<typeof agenticPlanSchema>;
 
 /**
  * AgenticPlanner – lightweight LLM‑driven planning wrapper.
@@ -479,10 +488,16 @@ If using \`append_test\`, format your response EXACTLY like this:
         const result = await this._requestPlan(lastError, testCode, testFilePath, history, sourceFilePath, explorationContext, astMap);
         if (!result || result.error || !result.plan) {
           console.log(chalk.red(`✖ AI failed to generate a valid plan. Retrying...`));
-          const errMsg = result?.error || "Your last response was not valid JSON or was missing a markdown code block. Ensure you output raw JSON only, and properly wrap replacement code in standard markdown blocks.";
-          console.log(chalk.red(`  Reason: ${errMsg}`));
+          const userErrMsg = result?.error || "The AI generated an invalid JSON response or was missing a markdown code block.";
+          console.log(chalk.red(`  Reason: ${userErrMsg}`));
 
-          explorationContext += `\n--- SYSTEM ERROR ---\n${errMsg}\n`;
+          let aiErrMsg = result?.error ? `You generated an invalid JSON response: ${result.error}` : "Your last response was not valid JSON or was missing a markdown code block. Ensure you output raw JSON only, and properly wrap replacement code in standard markdown blocks.";
+          if (result?.raw) {
+              const rawSnippet = result.raw.length > 500 ? result.raw.substring(0, 500) + '...' : result.raw;
+              aiErrMsg += `\n\nYOU OUTPUTTED THE FOLLOWING INVALID STRING:\n${rawSnippet}\n\nEnsure your response is ONLY valid JSON.`;
+          }
+
+          explorationContext += `\n--- SYSTEM ERROR ---\n${aiErrMsg}\n`;
           continue;
         }
         
@@ -759,25 +774,36 @@ Output ONLY the instruction string, nothing else.`;
   /** Extract JSON from LLM response and parse it. */
   private _parsePlan(text: string): { plan?: AgenticPlan, error?: string } {
     try {
-      const jsonPart = text.split(/```[ \t]*(?:javascript|typescript|js|ts)?[ \t]*\r?\n/i)[0];
-      const match = jsonPart.match(/\{[\s\S]*\}/);
-      if (!match) return { error: "No JSON object found in your response." };
-      
-      let obj;
-      try {
-        obj = JSON.parse(match[0]);
-      } catch (e: any) {
-        return { error: `Invalid JSON syntax: ${e.message}. Ensure strings are escaped correctly.` };
+      const validationResult = validateWithRepair(agenticPlanSchema, text, {
+        extractFromText: true,
+        fixMissingBrackets: true,
+        fixTrailingCommas: true,
+        coerceTypes: true
+      });
+
+      if (!validationResult.success) {
+        const errorDetails = validationResult.errors.map((e: any) => {
+           const pathPrefix = e.path.length > 0 ? `${e.path.join('.')}: ` : 'ROOT - ';
+           return `${pathPrefix}${e.message}`;
+        }).join(', ');
+        
+        return { error: `Invalid JSON syntax or schema violation: ${errorDetails}.` };
       }
+
+      let obj = validationResult.data as any;
       
       if (obj && Array.isArray(obj.steps)) {
-        const jsonStartIndex = text.indexOf(match[0]);
-        const jsonEndIndex = jsonStartIndex + match[0].length;
-        const textBeforeJson = text.substring(0, jsonStartIndex);
-        let textAfterJson = text.substring(jsonEndIndex);
-        
-        if (textBeforeJson.includes('```')) {
-           textAfterJson = textAfterJson.replace(/^[ \t]*\r?\n?```/, '');
+        let textAfterJson = text;
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const jsonStartIndex = text.indexOf(jsonMatch[0]);
+            const jsonEndIndex = jsonStartIndex + jsonMatch[0].length;
+            const textBeforeJson = text.substring(0, jsonStartIndex);
+            textAfterJson = text.substring(jsonEndIndex);
+            
+            if (textBeforeJson.includes('```')) {
+               textAfterJson = textAfterJson.replace(/^[ \t]*\r?\n?```/, '');
+            }
         }
         
         const blocks = [...textAfterJson.matchAll(/```[^\n]*\n([\s\S]*?)\r?\n?```/gi)];
@@ -809,7 +835,7 @@ Output ONLY the instruction string, nothing else.`;
       if (!allowed.has(step.action)) return `Invalid action: ${step.action}. Allowed actions are: ${Array.from(allowed).join(', ')}`;
       
       if (step.action === 'replace_lines' || step.action === 'delete_file') {
-        const abs = resolve(step.file);
+        const abs = resolve(step.file!);
         const isTestFile = abs === testFilePath;
         const isMockFile = abs.includes('__mocks__');
         const isConfigFile = abs.toLowerCase().includes('jest.config') || abs.toLowerCase().includes('setuptests') || abs.toLowerCase().includes('setup.js') || abs.toLowerCase().includes('setup.ts');
@@ -818,29 +844,29 @@ Output ONLY the instruction string, nothing else.`;
            if (!isMockFile && !isConfigFile) return `Validation failed for 'delete_file'. You may ONLY delete files inside __mocks__ or test configs. You attempted to delete: ${step.file}`;
         } else {
            if (!isTestFile && !isMockFile && !isConfigFile) return `Validation failed for 'replace_lines'. RULE VIOLATION: You may ONLY patch the test file (${testFilePath}), files inside __mocks__, or test configs. You attempted to patch application source code: ${step.file}. Do NOT modify application source code!`;
-           if (typeof (step as any).startLine !== 'number') return `Validation failed for 'replace_lines': 'startLine' must be a number.`;
-           if (typeof (step as any).endLine !== 'number') return `Validation failed for 'replace_lines': 'endLine' must be a number.`;
-           if (typeof (step as any).replacementCode !== 'string' && !Array.isArray((step as any).replacementCode)) return `Validation failed for 'replace_lines': 'replacementCode' must be a string or array of strings.`;
+           if (step.startLine === undefined) return `Validation failed for 'replace_lines': 'startLine' is required.`;
+           if (step.endLine === undefined) return `Validation failed for 'replace_lines': 'endLine' is required.`;
+           if (step.replacementCode === undefined) return `Validation failed for 'replace_lines': 'replacementCode' is required.`;
         }
       }
       if (step.action === 'install_deps') {
-        if (!Array.isArray((step as any).deps)) return `Validation failed for 'install_deps': 'deps' must be an array of strings.`;
+        if (step.deps === undefined) return `Validation failed for 'install_deps': 'deps' array is required.`;
       }
       if (step.action === 'read_file' || step.action === 'list_dir') {
-        if (typeof (step as any).path !== 'string') return `Validation failed for '${step.action}': 'path' must be a string.`;
+        if (step.path === undefined) return `Validation failed for '${step.action}': 'path' is required.`;
       }
       if (step.action === 'search_file') {
-        if (typeof (step as any).file !== 'string') return `Validation failed for 'search_file': 'file' must be a string.`;
-        if (typeof (step as any).query !== 'string') return `Validation failed for 'search_file': 'query' must be a string.`;
+        if (step.file === undefined) return `Validation failed for 'search_file': 'file' is required.`;
+        if (step.query === undefined) return `Validation failed for 'search_file': 'query' is required.`;
       }
       if (step.action === 'read_lines') {
-        if (typeof (step as any).file !== 'string') return `Validation failed for 'read_lines': 'file' must be a string.`;
-        if (typeof (step as any).startLine !== 'number') return `Validation failed for 'read_lines': 'startLine' must be a number.`;
-        if (typeof (step as any).endLine !== 'number') return `Validation failed for 'read_lines': 'endLine' must be a number.`;
+        if (step.file === undefined) return `Validation failed for 'read_lines': 'file' is required.`;
+        if (step.startLine === undefined) return `Validation failed for 'read_lines': 'startLine' is required.`;
+        if (step.endLine === undefined) return `Validation failed for 'read_lines': 'endLine' is required.`;
       }
       if (step.action === 'generate_mock') {
-        if (typeof (step as any).target !== 'string') return `Validation failed for 'generate_mock': 'target' must be a string.`;
-        if ((step as any).type !== 'external' && (step as any).type !== 'internal') return `Validation failed for 'generate_mock': 'type' must be either 'external' or 'internal'.`;
+        if (step.target === undefined) return `Validation failed for 'generate_mock': 'target' is required.`;
+        if (step.type === undefined) return `Validation failed for 'generate_mock': 'type' is required.`;
       }
     }
     return null;
