@@ -13,7 +13,7 @@ import { resolveTestFilePath } from '../core/pathResolver.js';
 import { Project, ts } from 'ts-morph';
 import chalk from 'chalk';
 import crypto from 'crypto';
-import { validateWithRepair, z, type infer as InferSchema } from '@scope/agent-response-schema';
+import { validateWithRepair, z, type infer as InferSchema } from 'agent-response-schema';
 
 const execAsync = promisify(exec);
 
